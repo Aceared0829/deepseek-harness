@@ -29,6 +29,16 @@ const view: AccountView = {
   links: { usageUrl: 'https://platform.deepseek.com/usage', topUpUrl: 'https://platform.deepseek.com/top_up' },
 }
 const stored: AccountView = { ...view, status: 'credential-stored' }
+
+it('keeps Account settings available before DeepSeek sign-in and reads ChatGPT usage independently', async ({ start }) => {
+  vi.stubGlobal('dshDesktop', {})
+  const c = await start()
+  expect(c.ctx.slots.entries('settings.section').some(entry => entry.options.id === 'account')).toBe(true)
+  const subscription = { status: 'ready' as const, email: 'user@example.test', plan: 'pro', quotas: [], credits: null }
+  c.mock.remote.chatgpt.read.mockResolvedValue(ok(subscription))
+  expect(await operations(c).readChatGptAccount?.()).toEqual(subscription)
+  expect(c.mock.remote.account.getProfile).not.toHaveBeenCalled()
+}, 60_000)
 const profile: AccountDetails['profile'] = { status: 'ready', value: { id: 'account-user' as AccountUserId, name: 'User', contact: null } }
 /** @param orderId - server order. @param message - server copy. @returns one unnotified bonus for this account. */
 function bonus(orderId: string, message = 'Awarded 5.00'): AccountBonusBatch {

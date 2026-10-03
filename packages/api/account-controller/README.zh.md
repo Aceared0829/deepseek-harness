@@ -26,12 +26,16 @@ account 命名空间提供 getState、getProfile / getBalance、getUnnotifiedBon
 
 `watchExpiry` 仅发送实时凭据失效通知，不发送初始值，也不重放历史通知。桌面端通过该流，在切换到 Welcome 时交接一次性 toast。
 
+`chatgpt.read` 读取已存储的 `llm-pi-ai/openai-codex` OAuth 登录，并通过模型提供方的凭据适配器刷新。它查询官方 Codex 用量接口，只返回邮箱、订阅方案、额度窗口和额外积分。缺少登录和查询失败分别返回 `signed-out` 与 `unavailable`；未返回的窗口或积分保持未知。登录变化会丢弃正在查询的响应。`chatGptUsageEndpoint` 与 `chatGptTimeoutMs` 配置查询地址和总请求期限；拒绝重定向，以免将凭据转发到其他地址。
+
 `hasRunningAccountTasks` 通过账号模块的判断函数，检查运行中 Agent 最近记录的请求上下文，包括工具和重试阶段。空闲 Agent 及 API key 上下文不计入。移除凭据时，账号提供方独立取消匹配任务。
 
 <a id="understand-the-implementation"></a>
 ## 理解实现
 
 控制器向账号服务转发操作，不维护独立的账号状态，因此不发布 invariant。
+
+`chatgpt.signIn` 通过发起浏览器持有的流运行已注册的 Codex OAuth 流程；关闭流会取消对应提问。客户端仅收到不含凭据的 HTTP(S) 授权链接和安全的结束状态。`chatgpt.signOut` 取消待完成的授权，等待已进入写入阶段的操作，再移除本地 ChatGPT 登录。
 
 <a id="further-exploration"></a>
 ## 深入探索

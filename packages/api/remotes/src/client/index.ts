@@ -7,6 +7,7 @@ import agentPresetsRemote from '@deepseek-ai/dsh-agent-preset-registry/remote'
 import userQuestionsRemote from '@deepseek-ai/dsh-user-questions/remote'
 import commandsRemote from '@deepseek-ai/dsh-commands/remote'
 import accountRemote from '@deepseek-ai/dsh-api-account-controller/remote'
+export type { ChatGptAccountView, ChatGptQuota, ChatGptQuotaWindow, ChatGptSignInEvent, ChatGptSignInAnswer } from '@deepseek-ai/dsh-api-account-controller/types'
 import settingsControllerRemote from '@deepseek-ai/dsh-api-settings-controller/remote'
 import officeToPdfRemote from '@deepseek-ai/dsh-office-to-pdf/remote'
 import goalsRemote from '@deepseek-ai/dsh-goal/remote'
@@ -157,6 +158,7 @@ export type { SessionReferenceMentionCandidate } from '@deepseek-ai/dsh-session-
 // dsh-client-test-runtime instead.
 export type {
   RemoteErrorCode, RemoteErrorDetailsMap, RemoteFailure, RemoteResult,
+  RemoteStreamHandle,
 } from '@deepseek-ai/dsh-typert-protocol'
 export type { RemoteHostFacts } from '@deepseek-ai/dsh-api-gateway/client'
 

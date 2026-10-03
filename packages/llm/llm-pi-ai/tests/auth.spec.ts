@@ -26,6 +26,28 @@ afterEach(async () => {
 })
 
 describe('pi-ai credential store over harness records', () => {
+  it('does not persist a credential mutation cancelled while waiting for the record lock', async () => {
+    const ctx = await stored()
+    const store = credentialStoreFrom(ctx)
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    const holding = ctx.credentials.modifyRecord(CODEX, async () => {
+      entered.resolve(undefined)
+      await release.promise
+      return { kind: 'grant', payload: { type: 'oauth', access: 'original', refresh: 'original', expires: 1 } }
+    })
+    await entered.promise
+    const lifetime = new AbortController()
+    const mutate = vi.fn(async () => ({ type: 'api_key' as const, key: 'cancelled' }))
+    const queued = store.modify('openai-codex', mutate, { signal: lifetime.signal })
+    const rejected = expect(queued).rejects.toMatchObject({ name: 'AbortError' })
+    lifetime.abort()
+    release.resolve(undefined)
+    await Promise.all([holding, rejected])
+    expect(mutate).not.toHaveBeenCalled()
+    expect(await store.read('openai-codex')).toMatchObject({ access: 'original' })
+  })
+
   it('reads nothing for a provider with no record', async () => {
     const store = credentialStoreFrom(await stored())
 

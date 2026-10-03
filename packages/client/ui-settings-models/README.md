@@ -29,7 +29,7 @@ Desktop product events use the optional [product analytics service](../product-a
 
 Saving credentials or a custom provider preserves the selected model. The user can select an available model from the composer.
 
-DeepSeek Account appears first and DeepSeek second in the provider list; third-party providers retain their directory order.
+DeepSeek Account appears first, ChatGPT Account second and DeepSeek third in the provider list; other providers retain their directory order. The installed `openai-codex` route has a persistent account row even without a settings override. Its editor displays the inherited GPT catalog directly and offers explicit model overrides without an API key input; subscription usage is displayed in Account settings.
 
 Open the Models page from the Settings navigation to see every configured provider as a row. A whole-section provider whose key is not configured anywhere renders as its open setup card instead, but only in the first-run posture and only until the user closes that card. Each card kind owns its own open state, so closing one never discards a draft in another.
 

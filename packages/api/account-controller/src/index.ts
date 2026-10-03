@@ -1,16 +1,27 @@
 /** Authenticated Remote operations for account UI consumers. */
 import { Context } from '@deepseek-ai/cordis'
+import schema from '@deepseek-ai/schemastery'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { isRunningAccountTask } from '@deepseek-ai/dsh-deepseek-account'
 import type {} from '@deepseek-ai/dsh-agent'
 import type { AccountBonusBatch, AccountBonusOrderId, AccountClientMetadata, AccountDetails, AccountUserId } from '@deepseek-ai/dsh-deepseek-account/types'
 import type { AccountView, SignInAttemptId } from './types.ts'
+import { ChatGptController, type ChatGptConfig } from './chatgpt.ts'
+export { ChatGptController } from './chatgpt.ts'
+export type { ChatGptConfig } from './chatgpt.ts'
 
 /** Account commands and reconnect-safe state stream. */
 export class AccountController extends TypertRemoteService {
   static inject = ['deepseekAccount', 'agents']
-  /** @param ctx - Host with the account provider mounted. */
-  constructor(ctx: Context) { super(ctx, 'accountController', { namespace: 'account' }) }
+  static Config: schema<ChatGptConfig, Required<ChatGptConfig>> = schema.object({
+    chatGptUsageEndpoint: schema.string().default('https://chatgpt.com/backend-api/wham/usage'),
+    chatGptTimeoutMs: schema.natural().min(1).default(20000),
+  })
+  /** @param ctx - Host with the account provider mounted. @param config - ChatGPT usage query policy. */
+  constructor(ctx: Context, config: ChatGptConfig = {}) {
+    super(ctx, 'accountController', { namespace: 'account' })
+    ctx.plugin(ChatGptController, AccountController.Config(config))
+  }
   /**
    * Read the safe account projection.
    * @returns current account and attempt state.

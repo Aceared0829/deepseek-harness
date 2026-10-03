@@ -180,6 +180,25 @@ export interface Config {
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-agent-tool-presentation -->
 
+<!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-api-account-controller -->
+<a id="deepseek-aidsh-api-account-controller"></a>
+
+## `@deepseek-ai/dsh-api-account-controller`
+
+- `inject`: `deepseekAccount` · `agents`
+- `source`: [`packages/api/account-controller/src/chatgpt.ts:12`](../packages/api/account-controller/src/chatgpt.ts)
+
+```ts config-catalog
+/** Deployment policy for authenticated ChatGPT usage queries. */
+export interface ChatGptConfig {
+  /** ChatGPT usage URL; defaults to the endpoint used by the official Codex client. */
+  readonly chatGptUsageEndpoint?: string
+  /** Authentication and usage request deadline in milliseconds; defaults to 20000. */
+  readonly chatGptTimeoutMs?: number
+}
+```
+<!-- END GENERATED config-catalog:@deepseek-ai/dsh-api-account-controller -->
+
 <!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-api-gateway -->
 <a id="deepseek-aidsh-api-gateway"></a>
 
@@ -4333,7 +4352,6 @@ export interface Config {
 | --- | --- | --- |
 | `@deepseek-ai/dsh-acp-app` | `cmdlineArgs` | [`packages/bundle/acp-app/src/index.ts`](../packages/bundle/acp-app/src/index.ts) |
 | `@deepseek-ai/dsh-agent` | — | [`packages/core/agent/src/index.ts`](../packages/core/agent/src/index.ts) |
-| `@deepseek-ai/dsh-api-account-controller` | `deepseekAccount` · `agents` | [`packages/api/account-controller/src/index.ts`](../packages/api/account-controller/src/index.ts) |
 | `@deepseek-ai/dsh-api-remotes` | `typertGateway` | [`packages/api/remotes/src/index.ts`](../packages/api/remotes/src/index.ts) |
 | `@deepseek-ai/dsh-authorization` | `credentials` | [`packages/credentials/authorization/src/index.ts`](../packages/credentials/authorization/src/index.ts) |
 | `@deepseek-ai/dsh-browser-use` | — | [`packages/browser-use/browser-use/src/index.ts`](../packages/browser-use/browser-use/src/index.ts) |

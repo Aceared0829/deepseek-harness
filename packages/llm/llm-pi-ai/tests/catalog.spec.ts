@@ -12,7 +12,7 @@ import { AssistantMessageEventStream } from '@earendil-works/pi-ai/utils/event-s
 import { normalizeContext } from '@earendil-works/pi-ai/utils/transcript'
 import type { Api, Model, OpenAICompletionsCompat, Provider } from '@earendil-works/pi-ai'
 import { resolveProfiles } from '../src/config.ts'
-import { createModels, createProvider, getSupportedThinkingLevels } from '../src/models.ts'
+import { createModels, createProvider, getSupportedThinkingLevels } from '@earendil-works/pi-ai'
 import { buildProvider, supportedProtocols } from '../src/provider.ts'
 import { assemble } from './assemble.ts'
 import { memoryAuth } from './auth-double.ts'
@@ -68,6 +68,24 @@ async function harness(config: LlmPiAi.Options): Promise<Context> {
   await ctx.plugin(LlmPiAi, config)
   return ctx
 }
+
+describe('OpenAI Codex subscription catalog', () => {
+  it('offers the current GPT-6 models without a narrowed model list', async () => {
+    const ctx = await harness({ providers: { 'openai-codex': {} } })
+    try {
+      const models = await ctx.llm.listModels('openai-codex')
+      const ids = ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-6.1-sol']
+      expect(models.map(model => model.id)).toEqual(expect.arrayContaining(ids))
+      for (const id of ids) {
+        const model = await ctx.llm.resolveModelInfo('openai-codex', id)
+        expect(model).toMatchObject({ provider: 'openai-codex', id, inputModalities: ['text', 'image'] })
+        expect(model.reasoning?.efforts.some(effort => effort.id === 'high')).toBe(true)
+      }
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+})
 
 describe('hand-declared providers', () => {
   it('serves a route pi-ai has never heard of from its own declaration', async () => {

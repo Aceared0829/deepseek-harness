@@ -1,0 +1,1 @@
+ChatGPT Accountopenai-codexThese models use your ChatGPT subscription. Manage sign-in and usage in Account settings.ModelsUsing the adapter defaultsFetch available modelsGPT-6.1 Solgpt-6.1-solGPT-6 Astragpt-6-astraAdd modelCancelApply

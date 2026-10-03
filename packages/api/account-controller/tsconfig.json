@@ -8,6 +8,10 @@
     "src"
   ],
   "references": [
+    { "path": "../../credentials/authorization" },
+    { "path": "../../../vendor/schemastery" },
+    { "path": "../../credentials/credentials" },
+    { "path": "../../llm/llm-pi-ai" },
     {
       "path": "../../../vendor/cosmokit"
     },

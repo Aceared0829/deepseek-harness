@@ -331,6 +331,20 @@ async function mountDeepSeekCard(overrides: Parameters<typeof scriptedFace>[0] =
 }
 
 describe('ModelsSection', () => {
+  it('shows the ChatGPT account row before a profile override exists and keeps it out of the add list', async () => {
+    const scripted = scriptedFace()
+    scripted.face.llm.listConfigurableProviders.mockResolvedValue(remoteOk([{
+      provider: 'openai-codex', displayName: 'openai-codex', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'openai-codex'],
+    }]))
+    await mountFace(scripted)
+    expect(screen.getByRole('button', { name: /Edit ChatGPT Account/ })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /Delete ChatGPT Account/ })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: en.add }))
+    expect(screen.queryByRole('option', { name: 'openai-codex' })).toBeNull()
+    expect(screen.getByLabelText(en.customRoute)).toBeTruthy()
+    expect(scripted.mutate).not.toHaveBeenCalled()
+  })
+
   it('hides the add action when no settings namespace can open an editor', async () => {
     const scripted = scriptedFace()
     scripted.face.settings.describe.mockResolvedValue(remoteOk({ writable: true, hasDocument: false, namespaces: [] }))
@@ -1901,6 +1915,28 @@ describe('apiKeyFailure', () => {
     expect(apiKeyFailure('"')).toBeUndefined()
     expect(apiKeyFailure('"a')).toBeUndefined()
   })
+})
+
+it.each([en, zh])('shows the inherited ChatGPT catalog without an API key field or implicit model pinning', async (copy) => {
+  const scripted = scriptedFace()
+  const ops = operationsWith(scripted.face)
+  vi.spyOn(ops, 'discoverModels').mockResolvedValue({ kind: 'found', models: [
+    { id: 'gpt-6.1-sol', name: 'GPT-6.1 Sol' },
+    { id: 'gpt-6-astra', name: 'GPT-6 Astra' },
+  ] })
+  const namespace = wireNamespaces().find(view => view.ns === 'llm-pi-ai')!
+  render(<ProviderEditor provider="openai-codex" displayName={copy.chatGptAccount}
+    namespace={namespace} settingsPath={['providers', 'openai-codex']} schema={settingsSchema}
+    operations={ops} t={key => copy[key]} readOnly={false} onClose={() => {}} />)
+  expect(screen.queryByLabelText(copy.keyInput)).toBeNull()
+  expect(screen.queryByLabelText(copy.baseUrl)).toBeNull()
+  await screen.findByText('GPT-6.1 Sol')
+  expect(screen.getByText('GPT-6 Astra')).toBeTruthy()
+  expect(screen.queryByText(copy.modelsEmpty)).toBeNull()
+  expect(scripted.mutate).not.toHaveBeenCalled()
+  expect(scripted.set).not.toHaveBeenCalled()
+  await expect(`${document.body.textContent}\n`)
+    .toMatchFileSnapshot(`./expected/chatgpt-models-${copy === en ? 'en' : 'zh'}.txt`)
 })
 
 it.each([en, zh])('edits the account model catalog without credential or endpoint fields', async (copy) => {
