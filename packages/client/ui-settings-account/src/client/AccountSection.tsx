@@ -11,6 +11,8 @@ import { AccountAvatar } from './AccountAvatar.tsx'
 import { authorizeUrlWithTheme } from './authorize-url.ts'
 import type { BonusNotice } from './bonus-notices.ts'
 import css from './AccountSection.module.css'
+import { ChatGptAccountCard, type ChatGptAccountCardProps } from './ChatGptAccountCard.tsx'
+import type { ChatGptAccountView } from '@deepseek-ai/dsh-api-remotes/client'
 
 /** Safe account snapshot shared by the settings page and launcher. */
 export interface AccountSnapshot {
@@ -33,6 +35,16 @@ export interface AccountSnapshot {
 
 /** Host operations injected into the Cordis-free account component. */
 export interface AccountSectionInjected {
+  /** Read the ChatGPT subscription with the same OAuth login used by models.
+   * @returns safe subscription profile and usage windows.
+   */
+  readChatGptAccount?: () => Promise<ChatGptAccountView>
+  /** ChatGPT browser authorization. */
+  signInChatGpt?: ChatGptAccountCardProps['signIn']
+  /** Remove the ChatGPT grant. */
+  signOutChatGpt?: ChatGptAccountCardProps['signOut']
+  /** Observe ChatGPT credential changes. */
+  subscribeChatGpt?: ChatGptAccountCardProps['subscribe']
   /** Subscribe to live credential-expiry notifications.
    * @param listener - callback after the current credential is removed.
    * @returns listener cleanup.
@@ -81,7 +93,9 @@ export interface AccountSectionInjected {
 export type AccountSectionProps =
   PropsRuntime<'settings.section'> & PropsLocale<'settings.account'> & InjectFace<AccountSectionInjected>
 /** @param props - localized actions, account subscription, and the shared Platform page channel. @returns account settings UI. */
-export function AccountSection({ t, useAccount, useTheme, start, cancel, openPlatformPage }: AccountSectionProps) {
+export function AccountSection({
+  t, useAccount, useTheme, start, cancel, openPlatformPage, readChatGptAccount, signInChatGpt, signOutChatGpt, subscribeChatGpt,
+}: AccountSectionProps) {
   const { view: state, details, failed: streamFailed } = useAccount(value => value)
   const colorScheme = useTheme(snapshot => snapshot.active.colorScheme)
   // The shared host owns the native view; this page holds only its own request,
@@ -138,7 +152,7 @@ export function AccountSection({ t, useAccount, useTheme, start, cancel, openPla
       : active ? t(attempt.phase === 'initializing' ? 'initializing' : attempt.phase === 'waiting-browser' ? 'waiting' : 'completing')
         : signedIn ? profile?.contact ?? t(details?.profile === undefined ? 'loading' : 'profileUnavailable') : t('signInDescription')
   if (!signedIn && !active) return (
-    <section className={css.signedOut} aria-label={t('nav')}>
+    <section className={readChatGptAccount === undefined ? css.signedOut : css.section} aria-label={t('nav')}>
       <div className={css.signedOutContent}>
         <div className={css.signedOutCopy}>
           <span className={css.signedOutTitle}>{t('settingsSignedOutTitle')}</span>
@@ -149,6 +163,8 @@ export function AccountSection({ t, useAccount, useTheme, start, cancel, openPla
         <Button variant="primary" className={css.signInButton} disabled={busy || state === undefined}
           onClick={() => { void run(start) }}>{t('signIn')}</Button>
       </div>
+      {readChatGptAccount !== undefined && <ChatGptAccountCard read={readChatGptAccount} signIn={signInChatGpt} signOut={signOutChatGpt}
+        subscribe={subscribeChatGpt} t={t} />}
     </section>
   )
   return (
@@ -210,6 +226,8 @@ export function AccountSection({ t, useAccount, useTheme, start, cancel, openPla
           </div>
         </div>
       </div>
+      {readChatGptAccount !== undefined && <ChatGptAccountCard read={readChatGptAccount} signIn={signInChatGpt} signOut={signOutChatGpt}
+        subscribe={subscribeChatGpt} t={t} />}
     </section>
   )
 }

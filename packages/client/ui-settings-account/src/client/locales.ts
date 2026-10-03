@@ -3,6 +3,18 @@ import { onboardingCopy, onboardingEnglishCopy } from './locales/onboarding.ts'
 
 /** English account dictionary. */
 export const en = {
+  chatGptAccount: 'ChatGPT Account', chatGptRefresh: 'Refresh usage',
+  chatGptSignIn: 'Sign in to ChatGPT', chatGptSigningIn: 'Continue signing in to ChatGPT in your browser.',
+  chatGptSigningOut: 'Signing out…', chatGptCode: 'Authorization code or callback URL',
+  chatGptSubmit: 'Continue', chatGptSelect: 'Select an option', chatGptVerificationCode: 'Verification code: {code}',
+  chatGptSignedOut: 'Sign in to ChatGPT to view your subscription usage.',
+  chatGptUnavailable: 'ChatGPT usage is unavailable. Try refreshing.',
+  chatGptStale: 'Could not refresh usage. Showing the previous reading.',
+  chatGptPlan: 'Subscription: {plan}', chatGptRemaining: '{percent}% remaining',
+  chatGptCodex: 'Codex', chatGptCodeReview: 'Code review', chatGptReserve: 'GPT reserve',
+  chatGptDays: '{count}-day quota', chatGptHours: '{count}-hour quota', chatGptMinutes: '{count}-minute quota',
+  chatGptWindow: 'Usage quota', chatGptReset: 'Resets {time}', chatGptCredits: 'Additional credits',
+  chatGptUnlimited: 'Unlimited', chatGptUnknown: 'Unavailable', chatGptNoQuotas: 'No usage windows reported.',
   modelSignInRequired: 'Model unavailable. Please sign in and try again.',
   sessionExpired: 'You have signed out of your account, please log in again.',
   ...onboardingEnglishCopy,
@@ -38,6 +50,18 @@ export const en = {
 export type AccountKey = keyof typeof en
 /** Chinese account settings copy. */
 export const zh: Record<AccountKey, string> = {
+  chatGptAccount: 'ChatGPT 账号', chatGptRefresh: '刷新额度',
+  chatGptSignIn: '登录 ChatGPT', chatGptSigningIn: '请在浏览器中完成 ChatGPT 登录。',
+  chatGptSigningOut: '正在退出…', chatGptCode: '授权码或回调地址',
+  chatGptSubmit: '继续', chatGptSelect: '请选择', chatGptVerificationCode: '验证码：{code}',
+  chatGptSignedOut: '登录 ChatGPT 后即可查看订阅额度。',
+  chatGptUnavailable: '暂时无法查询 ChatGPT 额度，请刷新重试。',
+  chatGptStale: '刷新额度失败，当前显示上次查询结果。',
+  chatGptPlan: '订阅：{plan}', chatGptRemaining: '剩余 {percent}%',
+  chatGptCodex: 'Codex', chatGptCodeReview: '代码审查', chatGptReserve: 'GPT 备用额度',
+  chatGptDays: '{count} 天额度', chatGptHours: '{count} 小时额度', chatGptMinutes: '{count} 分钟额度',
+  chatGptWindow: '使用额度', chatGptReset: '{time} 重置', chatGptCredits: '额外积分',
+  chatGptUnlimited: '无限制', chatGptUnknown: '暂不可用', chatGptNoQuotas: '接口暂未返回额度窗口。',
   modelSignInRequired: '当前模型暂不可用，请登录后再试',
   sessionExpired: '登录信息已失效，请重新登录',
   ...onboardingCopy,

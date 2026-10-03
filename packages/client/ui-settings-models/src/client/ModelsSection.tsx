@@ -233,7 +233,9 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
   const { controller, operations, schema, t } = injected
   const snapshot = injected.useSnapshot(value => value)
   const state = { ...snapshot, rows: snapshot.rows.map(row => row.entry.provider === 'deepseek-account'
-    ? { ...row, entry: { ...row.entry, displayName: t('deepSeekAccount') } } : row) }
+    ? { ...row, entry: { ...row.entry, displayName: t('deepSeekAccount') } }
+    : row.entry.provider === 'openai-codex'
+      ? { ...row, entry: { ...row.entry, displayName: t('chatGptAccount') } } : row) }
   const [editing, setEditing] = useState<EditorTarget | undefined>(undefined)
   const [addOpen, setAddOpen] = useState(false)
   const [addMode, setAddMode] = useState<AddMode>('catalog')
@@ -338,11 +340,11 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
   // One fact decides both first-run postures on this page and the onboarding
   // step: whether the user already has a provider to talk to.
   const anyUsable = state.rows.some(providerUsable)
-  const configured = state.rows.filter(row => row.configured)
+  const configured = state.rows.filter(row => row.configured || row.entry.provider === 'openai-codex')
   const configurable = state.rows.filter(row => state.namespaces.has(row.entry.settingsNs))
   const addable: AddableRow[] = state.rows.flatMap((row) => {
     const namespace = state.namespaces.get(row.entry.settingsNs)
-    return namespace === undefined || row.configured ? [] : [{ row, namespace }]
+    return namespace === undefined || row.configured || row.entry.provider === 'openai-codex' ? [] : [{ row, namespace }]
   })
   // Hand-declared routes live in the pi-ai namespace, which is also the only
   // one whose schema names the protocols one may speak; without it mounted
@@ -478,7 +480,7 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
                   >
                     {t('edit')}
                   </button>
-                  {row.removable
+                  {row.removable && row.entry.provider !== 'openai-codex'
                     ? (
                       <button
                         type="button"

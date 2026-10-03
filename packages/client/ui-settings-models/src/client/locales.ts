@@ -4,6 +4,8 @@
 export const en = {
   nav: 'Models',
   deepSeekAccount: 'DeepSeek Account',
+  chatGptAccount: 'ChatGPT Account',
+  chatGptModelsDescription: 'These models use your ChatGPT subscription. Manage sign-in and usage in Account settings.',
   title: 'Models',
   intro: 'Enter your API keys to use models from the following providers.',
   edit: 'Edit',
@@ -124,6 +126,8 @@ export type ModelsKey = keyof typeof en
 export const zh: { [Key in keyof typeof en]: string } = {
   nav: '模型',
   deepSeekAccount: 'DeepSeek 账号',
+  chatGptAccount: 'ChatGPT 账号',
+  chatGptModelsDescription: '这些模型使用你的 ChatGPT 订阅。在「账号与余额」中查看登录状态和额度。',
   title: '模型',
   intro: '填入各提供商的 API 密钥即可使用其模型。',
   edit: '编辑',

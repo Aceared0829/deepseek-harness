@@ -185,6 +185,7 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
   const fallback = schema.getPath(namespace.value, settingsPath)
   const disabled = props.readOnly || busy
   const accountProvider = props.provider === 'deepseek-account'
+  const chatGptProvider = props.provider === 'openai-codex'
   // Account settings use a configurable Cordis entry id.
   const layout = accountProvider ? 'deepseek' : layoutOf(namespace.ns)
   const keyRef = refFor(schema, namespace, settingsPath, props.provider)
@@ -198,7 +199,7 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
   )
 
   useEffect(() => {
-    if (accountProvider) return
+    if (accountProvider || chatGptProvider) return
     let stale = false
     setKeyState(undefined)
     // The key state is a placeholder hint, not a precondition for editing: a
@@ -208,7 +209,7 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
       setKeyState(described)
     })
     return () => { stale = true }
-  }, [operations, keyRef, accountProvider])
+  }, [operations, keyRef, accountProvider, chatGptProvider])
 
   const stringAt = (source: unknown, key: string): string | undefined => {
     const value = schema.getPath(source, [key])
@@ -376,6 +377,12 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
     if (accountProvider) return <DeepSeekModelsEditor {...catalogProps}
       defaultContextWindow={typeof defaultContextWindow === 'number' ? defaultContextWindow : undefined}
       defaultMaxTokens={typeof defaultMaxTokens === 'number' ? defaultMaxTokens : undefined} />
+    if (chatGptProvider) return <>
+      <p className={styles['intro']}>{t('chatGptModelsDescription')}</p>
+      <ModelListEditor {...catalogProps} catalogProvider={props.provider} showInheritedCatalog
+        defaultInput={Array.isArray(defaultInput) ? defaultInput : undefined}
+        probe={probe} operations={operations} onBusyChange={setListBusy} />
+    </>
     return (
       <>
         <div className={styles['field']}>
