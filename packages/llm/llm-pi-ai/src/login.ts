@@ -14,7 +14,7 @@ import { isCredentialKeySegment } from '@deepseek-ai/dsh-credentials'
 import { catalogProvider, catalogProviderIds } from './catalog.ts'
 import { recordKeyFor } from './auth.ts'
 import type { PiAiAuthInjection } from './adapter.ts'
-import { createModels } from './models.ts'
+import { createModels } from '@earendil-works/pi-ai'
 
 /**
  * The login methods one catalog provider offers.

@@ -94,6 +94,19 @@ The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-a
 
 A provider pi-ai ships a login for can be signed into through the harness authorization seam: the flow offers OAuth or an interactive key prompt (a key is typed into pi-ai's own login prompt, not into the settings form), and the resulting credential is stored in the harness credential store at `llm-pi-ai/<provider id>`. The stored sign-in authenticates its route beneath any `apiKeyEnv` override and refreshes itself under the store's cross-process lock; signing out deletes the stored record. A hand-declared route key outside the record grammar — a lowercase hyphenated identifier — cannot be signed into, because a record write for it refuses with `LlmError('UNSTORABLE_PROVIDER_ID')`; such a route authenticates through `apiKeyEnv` or ambient provider settings instead.
 
+### Use ChatGPT with Codex models
+
+Desktop Settings → Models displays the installed `openai-codex` provider as ChatGPT Account, with the inherited GPT catalog directly in its editor. Sign in through the harness authorization seam; the grant is stored in DSH's credential store and an existing Codex CLI login is not imported. The exported `credentialStoreFrom` and `authContextFrom` adapters let Host consumers refresh the same model login when reading subscription usage. The CLI is unnecessary for this LLM route; [`dsh-subagent-codex`](../../subagent/subagent-codex/README.md) separately runs Codex as a delegated agent.
+
+```yaml
+- id: llm-pi-ai
+  config:
+    providers:
+      openai-codex: {}
+```
+
+The installed catalog offers `gpt-6.1-sol`, `gpt-6-astra`, `gpt-6-sol`, and `gpt-6-luna`, with each model's declared image input and reasoning levels. Keep `models` absent to retain the complete catalog; an explicit list hides unlisted models. Catalog updates arrive through pi-ai dependency upgrades, and the provider determines account access. The adapter preserves tool calls, usage, and replay metadata through the normal DSH LLM service.
+
 ### Resolve the model catalog
 
 A profile's `models` list replaces the route's installed catalog rather than extending it; each entry defaults its unset fields from the installed model of the same id, so narrowing a route to two models, correcting one capacity, or adding a model newer than the installed catalog are one-line edits. `modelOverrides` reshapes individual installed-catalog models without that cost — correct one model, keep the other thirty-seven — and is refused when set beside a `models` list, on a hand-declared route, or naming a model the catalog does not describe, because a silently unchanged model would be a typo someone hunts for later.
@@ -132,7 +145,7 @@ This section explains the design behind the adapter; the observable behavior is 
 
 ### Design philosophy
 
-The adapter is built on immutable snapshots and per-operation resolution. Each operation captures a whole snapshot — the profiles plus a `createModels()` collection holding the `Provider` each route built — before its first `await`, and a configuration change builds a new collection rather than mutating the one in use, so a request that started under one configuration never finishes under another. A route's own credential reference resolves through the harness seam and rides as the request's `apiKey` option, which pi-ai treats as the highest-priority auth override — that is what keeps the fail-loud reference semantics. Everything that override does not cover reaches pi-ai through the collection's own auth: the credential store holds the records a login wrote and a refresh rotates (addressed as `llm-pi-ai/<provider id>`), and the auth context answers the ambient questions a provider asks while resolving. Both are stable across snapshots, so a configuration change rebuilds the collection without forgetting who is signed in. Runtime imports use pi-ai's provider, API, and utility entry points; `src/models.ts` supplies the small model-helper subset this adapter needs without evaluating pi-ai's aggregate entry point.
+The adapter is built on immutable snapshots and per-operation resolution. Each operation captures a whole snapshot — the profiles plus a `createModels()` collection holding the `Provider` each route built — before its first `await`, and a configuration change builds a new collection rather than mutating the one in use, so a request that started under one configuration never finishes under another. A route's own credential reference resolves through the harness seam and rides as the request's `apiKey` option, which pi-ai treats as the highest-priority auth override — that is what keeps the fail-loud reference semantics. Everything that override does not cover reaches pi-ai through the collection's own auth: the credential store holds the records a login wrote and a refresh rotates (addressed as `llm-pi-ai/<provider id>`), and the auth context answers the ambient questions a provider asks while resolving. Both are stable across snapshots, so a configuration change rebuilds the collection without forgetting who is signed in. Runtime imports use pi-ai's model helpers, provider, API, and utility entry points.
 
 ### Source map
 
@@ -143,7 +156,7 @@ The adapter is built on immutable snapshots and per-operation resolution. Each o
 | [`src/login.ts`](src/login.ts) | Authorization flows for the installed providers that ship a login |
 | [`src/config.ts`](src/config.ts) | Profile schema, resolution, and serviceability checks |
 | [`src/catalog.ts`](src/catalog.ts) | Installed-catalog integration and drift gates |
-| [`src/models.ts`](src/models.ts) | Model collections, static providers, and reasoning levels over narrow pi-ai entry points |
+| [`src/models.ts`](src/models.ts) | Re-exports of pi-ai's maintained model helpers |
 | [`src/provider.ts`](src/provider.ts) | The supported-protocol table and provider construction |
 | [`src/context.ts`](src/context.ts) | Harness-to-pi-ai context conversion, image handling, replay restore |
 | [`src/stream.ts`](src/stream.ts) | pi-ai event conversion into harness `StreamChunk` values |
@@ -161,6 +174,8 @@ Successful assistant responses store a versioned, lossless-JSON replay state bes
 </details>
 
 -----
+
+Credential mutations check cancellation after acquiring the local record lock. Once a mutation starts, it finishes before a subsequent deletion.
 
 <a id="further-exploration"></a>
 ## Further Exploration
@@ -229,7 +244,7 @@ These limits define where the adapter stops and future work begins. They are cur
 - **Only a leading in-history `system` message becomes pi-ai's `systemPrompt`** — this adapter uses pi-ai's single `systemPrompt` input, so a later `system` message, or a leading one when `GenerateOptions.system` is also set, folds into a `user` message at its position; provider-specific placement of the prompt follows pi-ai rather than a harness-owned wire override. Images in system or assistant history, including the leading system message, fail with `UNSUPPORTED_CONTENT` on both conversion paths.
 - **Provider HTTP status is unavailable** — pi-ai error events do not expose a stable HTTP status across providers.
 - **Retry policy is provider-owned, not an SDK retry** — pi-ai SDK retries stay disabled so durable agent steps and `llm/retry` events own every visible attempt, and direct `ctx.llm.stream()` calls remain single-attempt.
-- **Streamed tool-call arguments are parsed once, when the call ends** — the installed pi-ai carries [`patches/@earendil-works__pi-ai@0.87.1.patch`](../../../patches/@earendil-works__pi-ai@0.87.1.patch), which removes the per-delta re-parse of the whole accumulated argument JSON in every stream adapter (upstream [earendil-works/pi#9265](https://github.com/earendil-works/pi/issues/9265)); unpatched, a multi-megabyte argument stream costs O(n²) CPU on the event loop and stalls every session in the process. Until `toolcall_end`, a pi-ai partial's tool-call `arguments` stays `{}`; this adapter reads only the delta strings and the finalized arguments. Re-apply or retire the patch on every pi-ai upgrade.
+- **Streamed tool-call arguments are parsed once, when the call ends** — the installed pi-ai carries [`patches/@earendil-works__pi-ai@1.0.0.patch`](../../../patches/@earendil-works__pi-ai@1.0.0.patch), which removes the per-delta re-parse of the whole accumulated argument JSON in every stream adapter (upstream [earendil-works/pi#9265](https://github.com/earendil-works/pi/issues/9265)); unpatched, a multi-megabyte argument stream costs O(n²) CPU on the event loop and stalls every session in the process. Until `toolcall_end`, a pi-ai partial's tool-call `arguments` stays `{}`; this adapter reads only the delta strings and the finalized arguments. Re-apply or retire the patch on every pi-ai upgrade.
 
 <a id="dev-note"></a>
 ### Dev Note

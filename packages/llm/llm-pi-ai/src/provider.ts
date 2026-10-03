@@ -24,7 +24,7 @@ import { anthropicMessagesApi } from '@earendil-works/pi-ai/api/anthropic-messag
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy'
 import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.lazy'
 import { catalogProvider, PiAiCatalogError } from './catalog.ts'
-import { createProvider } from './models.ts'
+import { createProvider } from '@earendil-works/pi-ai'
 
 /**
  * Wire protocols a configured route may name, mapped to pi-ai's lazily loaded

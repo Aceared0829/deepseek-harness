@@ -6,6 +6,8 @@ import { AccountController } from '../src/index.ts'
 
 it('reports running account requests and excludes idle or unbound tasks', async () => {
   const ctx = new Context()
+  // Settle root plugin readiness before the controller mounts a credential-dependent child.
+  await ctx.plugin(() => {})
   const active: Array<Pick<Agent, 'status' | 'session'>> = []
   const task = (status: Agent['status'], provider?: string): Pick<Agent, 'status' | 'session'> => ({
     status, session: { requestContext: () => provider === undefined ? undefined : { provider, model: 'model' } } as Agent['session'],

@@ -26,12 +26,16 @@ Every operation that reaches Platform takes the calling UI's `AccountClientMetad
 
 `watchExpiry` delivers live credential-expiry notifications without an initial item or replay. Desktop uses this stream to hand off a one-shot toast when switching to Welcome.
 
+The `chatgpt.read` operation reads the stored `llm-pi-ai/openai-codex` OAuth login and refreshes it through the model provider's credential adapter. It queries the official Codex usage endpoint and returns only email, subscription plan, quota windows and additional credits. Missing login and failed queries return explicit `signed-out` and `unavailable` states; absent windows or credits remain unknown. A changed login discards the pending response. `chatGptUsageEndpoint` and `chatGptTimeoutMs` configure the endpoint and total request deadline; redirects are refused to prevent forwarding credentials to another endpoint.
+
 `hasRunningAccountTasks` checks running Agents through the account-owned predicate over their latest logged request context, including tools and retries. Idle Agents and API-key contexts are excluded. The account provider independently cancels matching tasks when credentials are removed.
 
 <a id="understand-the-implementation"></a>
 ## Understand the implementation
 
 The controller forwards operations to the account service and maintains no independent account state; no invariant companion is published.
+
+`chatgpt.signIn` runs the registered Codex OAuth flow on a browser-owned stream; closing the stream cancels its prompts. Only credential-free HTTP(S) authorization links and safe terminal states reach the client. `chatgpt.signOut` cancels pending authorization, waits for an admitted commit, and removes only the local ChatGPT grant.
 
 <a id="further-exploration"></a>
 ## Further Exploration

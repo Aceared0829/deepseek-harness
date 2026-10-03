@@ -14,7 +14,7 @@ Every package below exports a Cordis plugin that a bundle patch can name in a Lo
 
 | Package | Config | Description |
 |---|---|---|
-| `@deepseek-ai/dsh-api-account-controller` | no | Expose safe account operations over authenticated Remote |
+| `@deepseek-ai/dsh-api-account-controller` | yes | Expose safe account operations over authenticated Remote |
 | `@deepseek-ai/dsh-api-gateway` | yes | Typert Remote Host dispatcher and Client API endpoint |
 | `@deepseek-ai/dsh-api-job-controller` | yes | Job Remote observation stream and the reference-counted client job-output service |
 | `@deepseek-ai/dsh-api-remotes` | no | Remote BFF assembly for application-selected Host capabilities |

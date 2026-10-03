@@ -26,6 +26,9 @@
 /deepseek-ai-dsh-llm-pi-ai/use-this-package/sign-in-to-a-provider:
   en: c36f66438638ae08
   zh: 066a2fc4cb97c86f
+/deepseek-ai-dsh-llm-pi-ai/use-this-package/use-chatgpt-with-codex-models:
+  en: 9aab31d72621288f
+  zh: f681516e599a7ab4
 /deepseek-ai-dsh-llm-pi-ai/use-this-package/resolve-the-model-catalog:
   en: 376f83206858b601
   zh: 38bb6993609c96a6
@@ -45,16 +48,16 @@
   en: 1598ac8a8bb9b6bf
   zh: fdd089c5ae7722cd
 /deepseek-ai-dsh-llm-pi-ai/understand-the-implementation/design-philosophy:
-  en: 280416de410744bb
-  zh: 64cbfc0902e3f436
+  en: bc3132cac2601fa6
+  zh: 7266f2ec321fc9a4
 /deepseek-ai-dsh-llm-pi-ai/understand-the-implementation/source-map:
-  en: 20afee7bbfb332ca
-  zh: b080cf4e97094366
+  en: f5df657d1dad1ed0
+  zh: dfaeab302401d74d
 /deepseek-ai-dsh-llm-pi-ai/understand-the-implementation/registration-and-directory:
   en: 4da379c9be65c18a
   zh: fd305d4bd3dfa452
 /deepseek-ai-dsh-llm-pi-ai/understand-the-implementation/replay-and-vocabulary:
-  en: 36e0c59a0f9f5980
+  en: 3a63f4af045aac56
   zh: 90a62c4a9cd23429
 /deepseek-ai-dsh-llm-pi-ai/further-exploration:
   en: a2a2ccdeae59d408
@@ -87,8 +90,8 @@
   en: b6bd570c0159ba08
   zh: 7d2d91eea6a8d830
 /deepseek-ai-dsh-llm-pi-ai/known-limitations-and-deferred-work:
-  en: bb240ee5dd3f81c7
-  zh: 884506a36f4aac62
+  en: 24213b5d80e1b1ea
+  zh: e7524db2a35f6659
 /deepseek-ai-dsh-llm-pi-ai/known-limitations-and-deferred-work/dev-note:
   en: be67a4547256efbf
   zh: 8c32799683ba292c
