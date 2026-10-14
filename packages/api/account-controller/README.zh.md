@@ -33,7 +33,7 @@ account 命名空间提供 getState、getProfile / getBalance、getUnnotifiedBon
 <a id="understand-the-implementation"></a>
 ## 理解实现
 
-控制器向账号服务转发操作，不维护独立的账号状态，因此不发布 invariant。
+控制器向账号服务转发操作，不维护独立的账号状态。
 
 `chatgpt.signIn` 通过发起浏览器持有的流运行已注册的 Codex OAuth 流程；关闭流会取消对应提问。客户端仅收到不含凭据的 HTTP(S) 授权链接和安全的结束状态。`chatgpt.signOut` 取消待完成的授权，等待已进入写入阶段的操作，再移除本地 ChatGPT 登录。
 

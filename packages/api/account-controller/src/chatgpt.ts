@@ -1,6 +1,6 @@
 /** ChatGPT subscription account reads over the same OAuth store used by model requests. */
 import { Context } from '@deepseek-ai/cordis'
-import { createModels } from '@earendil-works/pi-ai'
+import { createModels } from '@earendil-works/pi-ai/models'
 import { openaiCodexProvider } from '@earendil-works/pi-ai/providers/openai-codex'
 import { authContextFrom, credentialStoreFrom, recordKeyFor } from '@deepseek-ai/dsh-llm-pi-ai'
 import type {} from '@deepseek-ai/dsh-authorization'

@@ -33,7 +33,7 @@ The `chatgpt.read` operation reads the stored `llm-pi-ai/openai-codex` OAuth log
 <a id="understand-the-implementation"></a>
 ## Understand the implementation
 
-The controller forwards operations to the account service and maintains no independent account state; no invariant companion is published.
+The controller forwards operations to the account service and maintains no independent account state.
 
 `chatgpt.signIn` runs the registered Codex OAuth flow on a browser-owned stream; closing the stream cancels its prompts. Only credential-free HTTP(S) authorization links and safe terminal states reach the client. `chatgpt.signOut` cancels pending authorization, waits for an admitted commit, and removes only the local ChatGPT grant.
 
