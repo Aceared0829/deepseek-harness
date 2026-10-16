@@ -29,7 +29,7 @@ async function fixture(signedIn = true) {
 function conversation(ctx: Context, signal: AbortSignal, source: AsyncIterable<ChatGptSignInAnswer>): ChatGptController {
   const invocation: RemoteInvocation = {
     request: { namespace: 'chatgpt', method: 'signIn', args: {} }, service: 'chatGptController',
-    peer: { id: 'test' as PeerId, ctx, async dispose() {} }, signal,
+    peer: { id: 'test' as PeerId, ctx, principal: { kind: 'owner' }, interactions: 'answer', signal, async dispose() {} }, signal,
     uplink<In>() { return source as AsyncIterable<In> },
   }
   return ctx.extend({ invocation }).get('chatGptController') as ChatGptController
@@ -133,7 +133,7 @@ it.each(['https://example.test/authorize', 'javascript:private-value', 'not a UR
   const uplink = { async *[Symbol.asyncIterator]() { yield await answer.promise; await closed.promise } }
   const invocation: RemoteInvocation = {
     request: { namespace: 'chatgpt', method: 'signIn', args: {} }, service: 'chatGptController',
-    peer: { id: 'test' as PeerId, ctx, async dispose() {} }, signal: lifetime.signal,
+    peer: { id: 'test' as PeerId, ctx, principal: { kind: 'owner' }, interactions: 'answer', signal: lifetime.signal, async dispose() {} }, signal: lifetime.signal,
     uplink<In>() { return uplink as AsyncIterable<In> },
   }
   ctx.authorization.registerFlow({ key: recordKeyFor('openai-codex'), label: 'ChatGPT', methods: [{ id: 'oauth', label: 'OAuth' }],
