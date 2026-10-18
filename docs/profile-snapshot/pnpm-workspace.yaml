@@ -1,0 +1,15 @@
+packages:
+  - .
+
+nodeLinker: hoisted
+autoInstallPeers: false
+minimumReleaseAgeExclude:
+  - dsh-plugin-marketplace@0.4.1
+  - '@linxin666/dsh-client-ui-task-board-github@0.4.5'
+  - dsh-diff-approval@0.35.0
+  - '@goodandready/dsh-time-machine@0.1.29'
+  - '@goodandready/dsh-plugin-notify@0.4.4'
+  - '@linxin666/dsh-pet@0.4.7'
+allowBuilds:
+  cpu-features: true
+  ssh2: true
