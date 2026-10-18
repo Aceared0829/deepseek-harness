@@ -33,12 +33,35 @@ $profile = "$env:DSH_PROFILE_DIR"
 ```
 
 脚本会：
-1. 备份现有 `package.json` / `pnpm-lock.yaml` 到 `.bak-<时间戳>`
+1. 备份现有 `package.json` / `pnpm-lock.yaml` / `pnpm-workspace.yaml` 到 `.bak-<时间戳>`
 2. 复制快照文件进去
 3. 把 `link:` 路径改写成新设备上的实际路径（或跳过）
-4. 执行 `pnpm install` 并在失败时自动回滚
+4. 执行 `pnpm install`，失败时回滚配置
+
+### 参数
+
+| 参数 | 说明 |
+| --- | --- |
+| `-ProfileDir <path>` | 目标 profile 目录，默认取 `$env:DSH_PROFILE_DIR` |
+| `-WorkspaceDir <path>` | 私有包所在 workspace 根目录。不指定时自动向上查找 `default-workspace`，再兜底 `~/Documents/deepseek-harness/default-workspace` |
+| `-SkipLocalPackages` | 强制跳过两个本地私有包 |
+| `-ForceUnfrozen` | 不使用 `--frozen-lockfile` |
+
+### 退出码
+
+| 码 | 含义 |
+| --- | --- |
+| `0` | 完全成功 |
+| `1` | 安装失败，配置已回滚（`node_modules` 可能残留，需手动清理） |
+| `2` | 配置已就位，但本机没有 `pnpm`，需手动执行 `pnpm install` |
+
+### 关于 `--frozen-lockfile`
+
+清单被改写时（跳过了私有包），`package.json` 与 lock 必然不一致，`--frozen-lockfile` 会直接失败。
+脚本会自动检测这种情况并退化为普通安装，不需要你手动处理。
 
 ## 注意
 
 - **`cordis.patch.yml` 不在此快照内** —— 那是你的私人运行时配置（模型清单、`baseURL`、主题、pet 位置）。需要的话单独拷贝。
 - 还原后重启 DSH 使插件生效。
+- 脚本只读取快照目录里的文件，**不会修改快照本身**，可以安全重复运行。
