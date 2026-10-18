@@ -71,8 +71,8 @@ export function joinProviderDirectory(
     })
   }
   return rows.toSorted((left, right) =>
-    (left.provider === 'deepseek-account' ? 0 : left.provider === 'openai-codex' ? 1 : left.provider === 'deepseek-official' ? 2 : 3)
-      - (right.provider === 'deepseek-account' ? 0 : right.provider === 'openai-codex' ? 1 : right.provider === 'deepseek-official' ? 2 : 3))
+    (left.provider === 'deepseek-account' ? 0 : left.provider === 'deepseek-official' ? 1 : 2)
+      - (right.provider === 'deepseek-account' ? 0 : right.provider === 'deepseek-official' ? 1 : 2))
 }
 
 /** One provider row the page renders. */

@@ -196,7 +196,6 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
   const node = useMemo(() => schema.nodeAtPath(root, settingsPath), [root, schema, settingsPath])
   const fallback = schema.getPath(namespace.value, settingsPath)
   const disabled = props.readOnly || busy
-  const chatGptProvider = props.provider === 'openai-codex' && schema.getPath(fallback, ['apiKeyEnv']) === undefined
   const layout = layoutOf(namespace.ns)
   const keyRef = refFor(schema, namespace, settingsPath, props.provider)
   // The same schema read the create card makes, so the choices offered here
@@ -414,12 +413,6 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
       },
       onReset: () => { setDraft(current => schema.deletePath(current, ['models'])) },
     }
-    if (chatGptProvider) return <>
-      <p className={styles['intro']}>{t('chatGptModelsDescription')}</p>
-      <ModelListEditor {...catalogProps} catalogProvider={props.provider} showInheritedCatalog
-        defaultInput={Array.isArray(defaultInput) ? defaultInput : undefined}
-        probe={probe} operations={operations} onBusyChange={setListBusy} />
-    </>
     return (
       <>
         {keylessNativeAuth

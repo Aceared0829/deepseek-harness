@@ -94,19 +94,6 @@ The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-a
 
 A provider pi-ai ships a login for can be signed into through the harness authorization seam: the flow offers OAuth or an interactive key prompt (a key is typed into pi-ai's own login prompt, not into the settings form), and the resulting credential is stored in the harness credential store at `llm-pi-ai/<provider id>`. The stored sign-in authenticates its route beneath any `apiKeyEnv` override and refreshes itself under the store's cross-process lock; signing out deletes the stored record. A hand-declared route key outside the record grammar — a lowercase hyphenated identifier — cannot be signed into, because a record write for it refuses with `LlmError('UNSTORABLE_PROVIDER_ID')`; such a route authenticates through `apiKeyEnv` or ambient provider settings instead.
 
-### Use ChatGPT with Codex models
-
-Desktop Settings → Models displays the installed `openai-codex` provider as ChatGPT Account, with the inherited GPT catalog directly in its editor. Sign in through the harness authorization seam; the grant is stored in DSH's credential store and an existing Codex CLI login is not imported. The exported `credentialStoreFrom` and `authContextFrom` adapters let Host consumers refresh the same model login when reading subscription usage. The CLI is unnecessary for this LLM route; [`dsh-subagent-codex`](../../subagent/subagent-codex/README.md) separately runs Codex as a delegated agent.
-
-```yaml
-- id: llm-pi-ai
-  config:
-    providers:
-      openai-codex: {}
-```
-
-The installed catalog offers `gpt-6.1-sol`, `gpt-6-astra`, `gpt-6-sol`, and `gpt-6-luna`, with each model's declared image input and reasoning levels. Keep `models` absent to retain the complete catalog; an explicit list hides unlisted models. Catalog updates arrive through pi-ai dependency upgrades, and the provider determines account access. The adapter preserves tool calls, usage, and replay metadata through the normal DSH LLM service.
-
 ### Resolve the model catalog
 
 A profile's `models` list replaces the route's installed catalog rather than extending it; each entry defaults its unset fields from the installed model of the same id, so narrowing a route to two models, correcting one capacity, or adding a model newer than the installed catalog are one-line edits. `modelOverrides` reshapes individual installed-catalog models without that cost — correct one model, keep the other thirty-seven — and is refused when set beside a `models` list, on a hand-declared route, or naming a model the catalog does not describe, because a silently unchanged model would be a typo someone hunts for later.
@@ -200,8 +187,6 @@ Successful assistant responses store a versioned, lossless-JSON replay state bes
 </details>
 
 -----
-
-Credential mutations check cancellation after acquiring the local record lock. Once a mutation starts, it finishes before a subsequent deletion.
 
 <a id="further-exploration"></a>
 ## Further Exploration

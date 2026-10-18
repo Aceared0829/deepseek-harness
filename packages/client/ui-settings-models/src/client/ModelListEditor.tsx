@@ -63,8 +63,6 @@ export interface ProbeTarget {
 
 /** Props of {@link ModelListEditor}. */
 export interface ModelListEditorProps {
-  /** Show the installed catalog as read-only rows while no model override is stored. */
-  showInheritedCatalog?: boolean
   /** The rows as currently drafted. */
   models: readonly ModelDraft[]
   /** Installed provider whose catalog supplies defaults without endpoint I/O. */
@@ -360,14 +358,7 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
           {busy ? t('fetching') : t('fetchModels')}
         </button>
       </div>
-      {models.length === 0 && props.showInheritedCatalog !== true ? <p className={styles['modelEmpty']}>{t('modelsEmpty')}</p> : null}
-      {models.length === 0 && props.showInheritedCatalog === true && catalog !== undefined
-        ? <ul className={styles['rows']} aria-label={t('models')}>
-          {catalog.map(model => <li className={styles['rowCard']} key={model.id}>
-            <div className={styles['rowHead']}><span className={styles['rowName']}>{model.name ?? model.id}</span>
-              <span className={styles['modelCatalogMeta']}>{model.id}</span></div>
-          </li>)}
-        </ul> : null}
+      {models.length === 0 ? <p className={styles['modelEmpty']}>{t('modelsEmpty')}</p> : null}
       <div className={styles['modelList']}>
         {models.map((model, index) => (
           <ModelRow
