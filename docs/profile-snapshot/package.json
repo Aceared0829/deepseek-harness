@@ -1,0 +1,51 @@
+{
+  "name": "dsh-profile-desktop",
+  "private": true,
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app",
+        "@deepseek-ai/dsh-experimental-agent-team-profile",
+        "@deepseek-ai/dsh-experimental-auto-review",
+        "@deepseek-ai/dsh-experimental-voice-input-bundle",
+        "@linxin666/dsh-client-ui-task-board",
+        "@linxin666/dsh-client-ui-task-board-github",
+        "@linxin666/dsh-ssh",
+        "@linxin666/dsh-usage",
+        "@linxin666/dsh-client-ui-model-capabilities",
+        "@linxin666/dsh-session-archive",
+        "@deepseek-ai/dsh-experimental-inspector-profile",
+        "@local/dsh-desktop-extras",
+        "@deepseek-ai/dsh-experimental-plugin-market-bundle",
+        "dsh-context",
+        "dsh-diff-approval",
+        "@goodandready/dsh-key-limits",
+        "@goodandready/dsh-time-machine",
+        "@goodandready/dsh-context-lens",
+        "@goodandready/dsh-plugin-notify",
+        "dsh-graph",
+        "dsh-planning-with-files",
+        "@dsh-pet/bridge"
+      ]
+    }
+  },
+  "dependencies": {
+    "@dsh-pet/bridge": "link:C:/Users/zzn19/Documents/deepseek-harness/default-workspace/pet-src/integrations/dsh-pet-bridge",
+    "@goodandready/dsh-context-lens": "0.1.33",
+    "@goodandready/dsh-key-limits": "0.2.27",
+    "@goodandready/dsh-plugin-notify": "0.4.4",
+    "@goodandready/dsh-time-machine": "0.1.29",
+    "@linxin666/dsh-client-ui-model-capabilities": "^0.4.4",
+    "@linxin666/dsh-client-ui-task-board": "^0.4.4",
+    "@linxin666/dsh-client-ui-task-board-github": "^0.4.5",
+    "@linxin666/dsh-session-archive": "^0.4.4",
+    "@linxin666/dsh-ssh": "^0.4.4",
+    "@linxin666/dsh-usage": "^0.4.4",
+    "@local/dsh-desktop-extras": "link:C:/Users/zzn19/Documents/deepseek-harness/default-workspace/bundles/desktop-extras",
+    "dsh-context": "0.72.0",
+    "dsh-diff-approval": "0.35.0",
+    "dsh-graph": "0.21.0",
+    "dsh-planning-with-files": "1.0.1"
+  }
+}
