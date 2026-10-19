@@ -87,53 +87,6 @@ async function loadComposition(): Promise<{ ctx: Context; settingsPath: string }
 }
 
 describe('llm-pi-ai real dormant composition', () => {
-  it('activates the Codex subscription route and sends GPT-6.1 tools with the stored OAuth grant', async () => {
-    const message = { type: 'message', id: 'msg_codex', role: 'assistant', status: 'completed',
-      content: [{ type: 'output_text', text: 'hello from Codex', annotations: [] }] }
-    const events = [
-      { type: 'response.output_item.added', output_index: 0, item: { ...message, content: [] } },
-      { type: 'response.content_part.added', output_index: 0, content_index: 0,
-        part: { type: 'output_text', text: '', annotations: [] } },
-      { type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: 'hello from Codex' },
-      { type: 'response.output_item.done', output_index: 0, item: message },
-      { type: 'response.completed', response: { id: 'resp_codex', status: 'completed', output: [message],
-        usage: { input_tokens: 3, output_tokens: 4, total_tokens: 7 } } },
-    ]
-    const server = await mockServer([{ events: events.map(event => JSON.stringify(event)) }])
-    const { ctx, settingsPath } = await loadComposition()
-    const key = LlmPiAi.recordKeyFor('openai-codex')
-    expect(ctx.authorization.describe(key)?.methods.map(method => method.id)).toEqual(['oauth'])
-    const access = `test.${Buffer.from(JSON.stringify({
-      'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' },
-    })).toString('base64url')}.test`
-    await ctx.credentials.modifyRecord(key, () => Promise.resolve({
-      kind: 'grant', payload: { type: 'oauth', access, refresh: 'test-refresh', expires: Date.now() + 3_600_000 },
-    }))
-    await writeFile(settingsPath, [
-      '- id: llm-pi-ai', '  config:', '    providers:', '      openai-codex:',
-      '        transport: sse', `        baseURL: ${server.url}`, '',
-    ].join('\n'))
-    await vi.waitFor(() => {
-      expect(ctx.llm.listProviders().map(provider => provider.id)).toEqual(['openai-codex'])
-    }, { timeout: 5000 })
-    expect((await ctx.llm.listModels('openai-codex')).map(model => model.id)).toContain('gpt-6.1-sol')
-    const result = await assemble(ctx, {
-      provider: 'openai-codex', model: 'gpt-6.1-sol', messages: [],
-      tools: [{ name: 'lookup', description: 'Look up a value.', parameters: { type: 'object' } }],
-    })
-    expect(result.finish).toEqual({ kind: 'stop' })
-    expect(result.message.content).toEqual([{ type: 'text', text: 'hello from Codex' }])
-    expect(server.paths).toEqual(['/codex/responses'])
-    expect(server.headers[0]?.authorization).toBe(`Bearer ${access}`)
-    expect(server.headers[0]?.['chatgpt-account-id']).toBe('test-account')
-    expect(server.requests[0]).toMatchObject({ model: 'gpt-6.1-sol', store: false, stream: true,
-      tools: [{ type: 'function', name: 'lookup' }] })
-    const llm = ctx.llm
-    await ctx.fiber.dispose()
-    context = undefined
-    expect(llm.listProviders()).toEqual([])
-  })
-
   it('boots with zero routes and registers one the moment settings supply a profile', async () => {
     vi.stubEnv('PI_COMPOSITION_KEY', '')
     const server = await mockServer([{ events: textEvents }])

@@ -160,7 +160,7 @@ export function credentialStoreFrom(ctx: Context): CredentialStore {
       }
       return mine
     },
-    async modify(providerId, mutate, options) {
+    async modify(providerId, mutate) {
       if (!isCredentialKeySegment(providerId)) {
         throw new LlmError(
           `llm-pi-ai: provider id "${providerId}" cannot address a stored credential record (a record id is a`
@@ -170,7 +170,6 @@ export function credentialStoreFrom(ctx: Context): CredentialStore {
         )
       }
       const stored = await writableStore(ctx).modifyRecord(recordKeyFor(providerId), async (current) => {
-        options?.signal?.throwIfAborted()
         const next = await mutate(toPiCredential(current))
         return next === undefined ? undefined : toRecord(next)
       })
