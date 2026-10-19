@@ -56,7 +56,7 @@ Press F12 (Fn+F12 on media-key keyboards), Command+Option+I on macOS, or Ctrl+Sh
 
 ## Terminal command
 
-The application menu's **Manage dsh Command…** entry, immediately below **Check for Updates…**, shows the current command and offers Install, Repair, and Remove. The command uses Desktop's installed runtime and the ordinary [dsh CLI](../cli/README.md), including when the Desktop application is closed. Open a new terminal after installation and run `dsh --version`.
+The application menu's **Manage dsh Command…** entry, immediately below **Check for Updates…**, shows the current command and offers Install, Repair, and Remove. The command uses Desktop's installed runtime and the ordinary [dsh CLI](../cli/README.md), including when the Desktop application is closed. Open a new terminal after installation and run `dsh --version`. Unpackaged development builds do not expose this entry.
 
 On macOS, installation creates `/usr/local/bin/dsh` and requests administrator authentication when the directory requires it. Shell startup files are unchanged. On Windows, the management dialog registers the command in the current user's PATH. A pre-existing command requires confirmation before switching; repairing Desktop's own selected command does not repeat that confirmation. The macOS link preserves and restores the displaced launcher; Windows preserves other PATH entries, including entries that predate registration. A command with higher PATH precedence is reported with its location. After moving the application, use Repair on macOS or Install from the new location on Windows. Remove leaves unrelated installations intact.
 

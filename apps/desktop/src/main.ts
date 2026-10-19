@@ -391,7 +391,6 @@ async function main(): Promise<void> {
   }
   const commandManager = new DesktopCommandManager({
     resources: process.resourcesPath,
-    isPackaged: app.isPackaged,
     isInstalledLocation: () => process.platform !== 'darwin' || app.isInApplicationsFolder(),
     isInstalling: () => updateState.phase === 'installing',
     isQuitting,
@@ -960,8 +959,9 @@ async function main(): Promise<void> {
       : { label: currentDesktopLocale().messages.aboutMenu, role: 'about' },
     { type: 'separator' },
     { label: currentDesktopLocale().messages.checkUpdatesMenu, click: () => { void openUpdatePrompt(true) } },
-    ...process.platform === 'darwin' || process.platform === 'win32'
-      ? [{ label: currentDesktopLocale().messages.cliCommandMenu, click: () => { void commandManager.show() } }] : [],
+    ...((process.platform === 'darwin' || process.platform === 'win32') && app.isPackaged
+      ? [{ label: currentDesktopLocale().messages.cliCommandMenu, click: () => { void commandManager.show() } }]
+      : []),
     ...development ? [
       { type: 'separator' as const },
       { label: currentDesktopLocale().messages.reloadPageMenu, role: 'reload' as const },

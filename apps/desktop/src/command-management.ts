@@ -35,7 +35,6 @@ export interface CommandPresentation {
 /** Shell-owned access to installed resources, locale and native dialogs. */
 export interface CommandManagerOptions {
   readonly resources: string
-  readonly isPackaged: boolean
   readonly isInstalledLocation: () => boolean
   readonly isInstalling: () => boolean
   readonly isQuitting: () => boolean
@@ -182,7 +181,7 @@ export class DesktopCommandManager {
 
   private async run(): Promise<void> {
     const messages = this.options.messages()
-    if (!this.options.isPackaged || !this.options.isInstalledLocation()) {
+    if (!this.options.isInstalledLocation()) {
       await this.options.show({ type: 'info', title: messages.cliCommandTitle, message: messages.cliCommandInstallApp, buttons: [messages.cliCommandClose] })
       return
     }
