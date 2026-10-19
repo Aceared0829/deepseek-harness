@@ -19,16 +19,15 @@
  *   --static-only    run S0 and exit
  *   --dsh <path>     CLI entry to stage with (default: Desktop dev runtime)
  *   --home <path>    live DSH_HOME; used only to validate the binding
- *   --port <n>       port for the staged instance (default: first free from 53612)
+ *   --port <n>       port for the staged instance (default: OS-assigned)
  *   --timeout <s>    boot timeout (default 90)
  *   --keep           keep the staging directory and log on success too
  *   --open           open the staged instance in a browser
  */
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -59,16 +58,32 @@ function parseArgs(argv) {
     if (arg === '--static-only') out.staticOnly = true
     else if (arg === '--keep') out.keep = true
     else if (arg === '--open') out.open = true
-    else if (arg === '--dsh') out.dsh = argv[++i]
-    else if (arg === '--home') out.home = argv[++i]
-    else if (arg === '--port') out.port = Number(argv[++i])
-    else if (arg === '--timeout') out.timeout = Number(argv[++i])
+    else if (arg === '--dsh') out.dsh = optionValue(argv, ++i, arg)
+    else if (arg === '--home') out.home = optionValue(argv, ++i, arg)
+    else if (arg === '--port') out.port = Number(optionValue(argv, ++i, arg))
+    else if (arg === '--timeout') out.timeout = Number(optionValue(argv, ++i, arg))
     else if (arg.startsWith('--')) throw new Error(`unknown option ${arg}`)
     else if (out.dir === undefined) out.dir = resolve(arg)
     else throw new Error(`unexpected argument ${arg}`)
   }
-  if (out.port !== undefined && !Number.isInteger(out.port)) throw new Error('--port needs an integer')
+  if (out.port !== undefined && (!Number.isInteger(out.port) || out.port < 1 || out.port > 65535)) {
+    throw new Error('--port needs an integer from 1 to 65535')
+  }
+  if (!Number.isFinite(out.timeout) || out.timeout <= 0) throw new Error('--timeout needs a positive number of seconds')
   return out
+}
+
+/**
+ * Read a required option value.
+ * @param {string[]} argv arguments after the script path
+ * @param {number} index value position
+ * @param {string} option option that needs the value
+ * @returns {string}
+ */
+function optionValue(argv, index, option) {
+  const value = argv[index]
+  if (value === undefined || value.startsWith('--')) throw new Error(`${option} needs a value`)
+  return value
 }
 
 /**
@@ -130,7 +145,9 @@ function staticChecks(dir) {
   }
 
   const patch = pkg.dsh?.bundle?.patch
-  for (const file of patch === undefined ? [] : Array.isArray(patch) ? patch : [patch]) {
+  const patches = patch === undefined ? [] : Array.isArray(patch) ? patch : [patch]
+  if (patches.length === 0) warn('dsh.bundle.patch is missing; full staging requires an installable bundle')
+  for (const file of patches) {
     if (typeof file !== 'string' || !existsSync(join(dir, file))) fail(`dsh.bundle.patch -> ${file} does not exist`)
     else pass(`bundle patch ${file}`)
   }
@@ -141,7 +158,7 @@ function staticChecks(dir) {
     if (entryProblem) fail(entryProblem)
     const result = run(process.execPath, ['--input-type=module', '-e',
       `await import(${JSON.stringify(pathToFileURL(hostEntry).href)})`], { cwd: dir, timeout: 30_000 })
-    if (result.status === 0) pass(`Host entry loads (${hostEntry.replace(dir, '') || '/index.js'})`)
+    if (result.status === 0) pass(`Host entry loads (${relative(dir, hostEntry)})`)
     else fail(`Host entry failed to load: ${errorSummary(result.stderr || result.stdout)}`)
   } else {
     warn('no Host entry found; the bundle only contributes configuration')
@@ -155,10 +172,15 @@ function staticChecks(dir) {
     else {
       const clientProblem = encodingProblem(clientPath)
       if (clientProblem) fail(clientProblem)
-      const probe = join(tmpdir(), `dsh-client-probe-${process.pid}-${Date.now()}.mjs`)
-      writeFileSync(probe, CLIENT_PROBE, 'utf8')
-      const result = run(process.execPath, [probe, pathToFileURL(clientPath).href], { cwd: dir, timeout: 30_000 })
-      rmSync(probe, { force: true })
+      const probeDir = mkdtempSync(join(tmpdir(), 'dsh-client-probe-'))
+      const probe = join(probeDir, 'probe.mjs')
+      let result
+      try {
+        writeFileSync(probe, CLIENT_PROBE, 'utf8')
+        result = run(process.execPath, [probe, pathToFileURL(clientPath).href], { cwd: dir, timeout: 30_000 })
+      } finally {
+        rmSync(probeDir, { recursive: true, force: true })
+      }
       for (const line of result.stdout.split('\n').filter(Boolean)) {
         if (line.startsWith('FAIL ')) fail(line.slice(5))
         else if (line.startsWith('WARN ')) warn(line.slice(5))
@@ -245,24 +267,6 @@ function tail(text, n) {
 }
 
 /**
- * First free TCP port at or above the preferred one.
- * @param {number} preferred starting port
- * @returns {Promise<number>}
- */
-async function freePort(preferred) {
-  for (let port = preferred; port < preferred + 50; port++) {
-    const available = await new Promise((done) => {
-      const server = createServer()
-      server.once('error', () => done(false))
-      server.once('listening', () => server.close(() => done(true)))
-      server.listen(port, '127.0.0.1')
-    })
-    if (available) return port
-  }
-  throw new Error('no free port found')
-}
-
-/**
  * Kill a process and its descendants.
  * @param {number} pid process id
  */
@@ -272,6 +276,17 @@ function killTree(pid) {
     return
   }
   try { process.kill(-pid, 'SIGKILL') } catch { try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ } }
+}
+
+/**
+ * Stop a staged Host and wait for its process to exit.
+ * @param {import('node:child_process').ChildProcess | undefined} child spawned Host
+ */
+async function stopChild(child) {
+  if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return
+  const exited = new Promise((done) => child.once('exit', done))
+  killTree(child.pid)
+  await exited
 }
 
 /**
@@ -304,12 +319,24 @@ function report(options, context) {
     if (options.keep || state.failures.length > 0) {
       console.log(`\n  staging kept: ${context.stageHome}`)
       console.log(`  log:          ${context.logPath}`)
-      console.log(`  inspect it:   node ${context.dsh} --profile ${STAGE_PROFILE} --port 53699`)
+      console.log(`  inspect it:   ${inspectCommand(context)}`)
     } else {
       try { rmSync(context.stageHome, { recursive: true, force: true }) } catch { console.log(`\n  staging dir busy: ${context.stageHome}`) }
     }
   }
   process.exitCode = state.failures.length === 0 ? 0 : 1
+}
+
+/**
+ * Render a copyable command that binds inspection to the kept staging home.
+ * @param {{stageHome: string, dsh: string}} context staging artifacts
+ * @returns {string}
+ */
+function inspectCommand(context) {
+  if (process.platform === 'win32') {
+    return `$env:DSH_HOME=${JSON.stringify(context.stageHome)}; node ${JSON.stringify(context.dsh)} --profile ${STAGE_PROFILE} --port 53699`
+  }
+  return `DSH_HOME=${JSON.stringify(context.stageHome)} node ${JSON.stringify(context.dsh)} --profile ${STAGE_PROFILE} --port 53699`
 }
 
 async function main() {
@@ -325,6 +352,11 @@ async function main() {
 
   const pkg = staticChecks(options.dir)
   if (options.staticOnly || state.failures.length > 0) { report(options); return }
+  if (pkg?.dsh?.bundle?.patch === undefined) {
+    fail('package does not declare dsh.bundle.patch, so dsh plugin add cannot activate it as a bundle')
+    report(options)
+    return
+  }
 
   const dsh = resolve(options.dsh ?? DEFAULT_DSH)
   if (!existsSync(dsh)) {
@@ -376,7 +408,8 @@ async function main() {
     const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
     const bundles = manifest.dsh?.profile?.bundles ?? []
     if (pkg?.name && bundles.includes(pkg.name)) pass(`bundle list includes ${pkg.name}`)
-    else warn(`bundle list does not name ${pkg?.name ?? 'the package'}; it stays a plain dependency`)
+    else fail(`bundle list does not include ${pkg?.name ?? 'the package'}; installation did not activate its bundle layer`)
+    if (state.failures.length > 0) { report(options, context); return }
     if (pkg?.name && existsSync(join(profileDir, 'node_modules', ...pkg.name.split('/')))) {
       pass('package resolvable from the staging profile')
     } else {
@@ -384,9 +417,8 @@ async function main() {
     }
 
     stage('S3 boot + S4 probe')
-    const port = options.port ?? await freePort(53612)
-    const origin = `http://127.0.0.1:${port}/`
-    let probeUrl = origin
+    const port = options.port ?? 0
+    let probeUrl
     child = spawn(process.execPath, [dsh, '--profile', STAGE_PROFILE, '--port', String(port), '--no-open'], {
       cwd: stageHome,
       env,
@@ -408,6 +440,10 @@ async function main() {
       if (exitCode !== null) break
       const announced = extractUrl(Buffer.concat(chunks).toString('utf8'))
       if (announced) probeUrl = announced
+      if (probeUrl === undefined) {
+        await sleep(400)
+        continue
+      }
       try {
         const response = await fetch(probeUrl, { signal: AbortSignal.timeout(3000), redirect: 'manual' })
         status = response.status
@@ -429,9 +465,10 @@ async function main() {
       report(options, context)
       return
     }
-    if (served) pass(`${origin} accepted the token and served the shell (HTTP ${status})`)
-    else if (status === 401) fail(`${origin} answered 401: reachable but the token was rejected`)
-    else fail(`${origin} did not serve within ${options.timeout}s (last status ${status})`)
+    const target = probeUrl === undefined ? `port ${port}` : new URL(probeUrl).origin
+    if (served) pass(`${target} accepted the token and served the shell (HTTP ${status})`)
+    else if (status === 401) fail(`${target} answered 401: reachable but the token was rejected`)
+    else fail(`${target} did not serve within ${options.timeout}s (last status ${status})`)
 
     const failedFibers = log.split('\n').filter((line) => /\bFAILED\b/.test(line) || /\): Error: /.test(line))
     const inactive = log.match(/warning: (\d+) entr(?:y|ies) did not activate/)
@@ -451,16 +488,25 @@ async function main() {
     }
 
     if (options.open) {
+      if (probeUrl === undefined) {
+        fail('cannot open the staged instance because it never announced a URL')
+        return
+      }
       const command = process.platform === 'win32' ? ['cmd', ['/c', 'start', '', probeUrl]]
         : process.platform === 'darwin' ? ['open', [probeUrl]] : ['xdg-open', [probeUrl]]
       spawnSync(command[0], command[1], { windowsHide: true, stdio: 'ignore' })
-      console.log(`\n  open  ${origin}  (fresh home: no credentials, log in there to interact)`)
+      console.log(`\n  open  ${new URL(probeUrl).origin}  (fresh home: no credentials, log in there to interact)`)
       await sleep(1500)
     }
   } finally {
-    if (child?.pid) killTree(child.pid)
+    await stopChild(child)
     report(options, context)
   }
 }
 
-await main()
+try {
+  await main()
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error))
+  process.exitCode = 1
+}
