@@ -4,7 +4,7 @@ A bundle's first run must not happen in the profile you are working in. When a p
 
 ## Stage in a disposable profile
 
-From a DSH source checkout, one command runs the whole gate:
+From the DSH checkout that provides this Harness, one command runs the whole gate. When the workspace is not that checkout, invoke the script by absolute path:
 
     node scripts/stage-verify.mjs <bundle-dir>
 
