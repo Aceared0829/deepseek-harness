@@ -89,9 +89,9 @@ function fakeCli(root: string, options: {
   const bin = join(root, 'dsh', 'lib', 'bin.js')
   const state = join(root, 'cli-state.json')
   write(bin, `
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 
 const args = process.argv.slice(2)
 const statePath = ${JSON.stringify(state)}

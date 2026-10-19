@@ -127,6 +127,7 @@ function staticChecks(dir) {
   if (!existsSync(pkgPath)) { fail('package.json missing'); return undefined }
   const problem = encodingProblem(pkgPath)
   if (problem) fail(problem)
+  if (problem) return undefined
 
   let pkg
   try { pkg = JSON.parse(readFileSync(pkgPath, 'utf8').replace(/^\uFEFF/, '')) } catch (error) {
