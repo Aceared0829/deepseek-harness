@@ -18,6 +18,8 @@ function fixture() {
   const host = {
     start: vi.fn(() => { started.resolve(); return ready.promise }),
     stop: vi.fn(() => { stopping.resolve(); return exited.promise }),
+    bootInjections: vi.fn(async () => ({ injections: [], lease: 'boot-1' })),
+    releaseBootInjections: vi.fn(async () => {}),
   }
   const create = vi.fn((onFailure: (error: Error) => void) => { fail = onFailure; return host })
   const controller = new DesktopBackendController(create, state => states.push(state))

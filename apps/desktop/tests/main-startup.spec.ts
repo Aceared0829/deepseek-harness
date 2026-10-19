@@ -132,7 +132,8 @@ const harness = await vi.hoisted(async () => {
   class FakeHost {
     readonly updateTasks = vi.fn(async (_action: 'inspect' | 'lock' | 'unlock') => false)
     readonly inspectQuit = vi.fn(async () => ({ activeTasks: false, scheduledTasks: false }))
-    readonly bootInjections = vi.fn(async () => [] as readonly unknown[])
+    readonly bootInjections = vi.fn(async () => ({ injections: [] as readonly unknown[], lease: 'boot-1' }))
+    readonly releaseBootInjections = vi.fn(async (_lease: string) => {})
     url = 'http://127.0.0.1:3080/?token=test'
     fetch = vi.fn(async () => Response.json({ hasApiKey: true, writable: true, localePreference: null }))
     readonly ready = deferred()
@@ -378,7 +379,7 @@ function configureTestAuthPopup(allow: boolean): void {
   writeFileSync(join(directory, 'settings.json'), JSON.stringify({ updates: { allowTestAuthPopupWindow: allow } }))
 }
 
-function invoke(channel: string, origin = channel === DESKTOP_IPC.boot ? 'app' : 'shell', ...args: unknown[]): unknown {
+function invoke(channel: string, origin = channel === DESKTOP_IPC.boot || channel === DESKTOP_IPC.bootRelease ? 'app' : 'shell', ...args: unknown[]): unknown {
   const handler = harness.handlers.get(channel)
   if (handler === undefined) throw new Error(`missing handler ${channel}`)
   if (origin === 'app') {
@@ -386,6 +387,11 @@ function invoke(channel: string, origin = channel === DESKTOP_IPC.boot ? 'app' :
     return handler({ sender, senderFrame: sender.mainFrame }, ...args)
   }
   return handler({ senderFrame: { url: `dsh-app://${origin}/index.html` } }, ...args)
+}
+
+function windowDestroyed(window: InstanceType<typeof harness.FakeWindow>): void {
+  window.destroyed = true
+  window.webContents.emit('destroyed')
 }
 
 function applicationMenuItems(): MenuItemConstructorOptions[] {
@@ -1124,8 +1130,10 @@ describe('desktop main startup', () => {
     await harness.preparing.promise
     const handler = harness.handlers.get(DESKTOP_IPC.boot)!
     await expect(handler({ senderFrame: { url: 'https://other.example/' } })).rejects.toThrow('unowned renderer')
+    const window = harness.windows[0]!
+    const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame }
     let settled = false
-    const boot = Promise.resolve(handler({ senderFrame: { url: 'dsh-app://app/' } })).then((value) => { settled = true; return value })
+    const boot = Promise.resolve(handler(event)).then((value) => { settled = true; return value })
     await Promise.resolve()
     expect(settled).toBe(false)
     expect(harness.windows[0]!.urls).toEqual(['dsh-app://app/'])
@@ -1133,7 +1141,7 @@ describe('desktop main startup', () => {
     await harness.hostStarted.promise
     expect(settled).toBe(false)
     harness.hosts[0]!.ready.resolve()
-    await expect(boot).resolves.toEqual({ injections: [], streamBaseUrl: 'http://127.0.0.1:3080' })
+    await expect(boot).resolves.toEqual({ injections: [], lease: 'boot-1', streamBaseUrl: 'http://127.0.0.1:3080' })
     expect(harness.windows[0]!.urls).toEqual(['dsh-app://app/'])
   })
 
@@ -1143,20 +1151,221 @@ describe('desktop main startup', () => {
     harness.prepared.resolve()
     await harness.hostStarted.promise
     const instance = harness.hosts.at(-1)!
-    instance.bootInjections.mockResolvedValueOnce([
-      { kind: 'script-src', placement: 'head', src: '/plugins/??first/client.js&rev=first' },
-    ]).mockResolvedValueOnce([
-      { kind: 'script-src', placement: 'head', src: '/plugins/??second/client.js&rev=second' },
-    ])
+    instance.bootInjections.mockResolvedValueOnce({
+      injections: [{ kind: 'script-src', placement: 'head', src: '/plugins/??first/client.js&rev=first' }],
+      lease: 'boot-first',
+    }).mockResolvedValueOnce({
+      injections: [{ kind: 'script-src', placement: 'head', src: '/plugins/??second/client.js&rev=second' }],
+      lease: 'boot-second',
+    })
     instance.ready.resolve()
-    const event = { senderFrame: { url: 'dsh-app://app/' } }
+    const window = harness.windows[0]!
+    const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame }
     await expect(Promise.resolve(harness.handlers.get(DESKTOP_IPC.boot)!(event))).resolves.toMatchObject({
       injections: [{ src: '/plugins/??first/client.js&rev=first' }],
     })
+    expect(instance.releaseBootInjections).not.toHaveBeenCalled()
     await expect(Promise.resolve(harness.handlers.get(DESKTOP_IPC.boot)!(event))).resolves.toMatchObject({
       injections: [{ src: '/plugins/??second/client.js&rev=second' }],
     })
+    expect(instance.releaseBootInjections).toHaveBeenCalledExactlyOnceWith('boot-first')
     expect(instance.bootInjections).toHaveBeenCalledTimes(2)
+  })
+
+  it('releases only the renderer-owned boot lease and ignores failures after renderer destruction', async () => {
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const host = harness.hosts[0]!
+    host.ready.resolve()
+    const window = harness.windows[0]!
+    const sender = window.webContents
+    const boot = await invoke(DESKTOP_IPC.boot) as { lease: string }
+    await expect(invoke(DESKTOP_IPC.bootRelease, 'app', 'boot-foreign')).resolves.toBeUndefined()
+    expect(host.releaseBootInjections).not.toHaveBeenCalled()
+    window.destroyed = true
+    sender.isDestroyed = () => true
+    host.releaseBootInjections.mockRejectedValueOnce(new Error('child exited'))
+    await expect(invoke(DESKTOP_IPC.bootRelease, 'app', boot.lease)).resolves.toBeUndefined()
+    expect(host.releaseBootInjections).toHaveBeenCalledExactlyOnceWith(boot.lease)
+  })
+
+  it('retains a boot lease when the Host rejects its release before renderer destruction', async () => {
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const host = harness.hosts[0]!
+    host.ready.resolve()
+    const boot = await invoke(DESKTOP_IPC.boot) as { lease: string }
+    host.releaseBootInjections.mockRejectedValueOnce(new Error('release transport failed'))
+    await expect(invoke(DESKTOP_IPC.bootRelease, 'app', boot.lease)).rejects.toThrow('release transport failed')
+
+    windowDestroyed(harness.windows[0]!)
+    await vi.waitFor(() => { expect(host.releaseBootInjections).toHaveBeenCalledTimes(2) })
+    expect(host.releaseBootInjections).toHaveBeenLastCalledWith(boot.lease)
+  })
+
+  it('releases an outstanding boot lease when the renderer is destroyed', async () => {
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const host = harness.hosts[0]!
+    host.ready.resolve()
+    const window = harness.windows[0]!
+    const first = await invoke(DESKTOP_IPC.boot) as { lease: string }
+    windowDestroyed(window)
+    await vi.waitFor(() => { expect(host.releaseBootInjections).toHaveBeenCalledWith(first.lease) })
+    expect(host.releaseBootInjections).toHaveBeenCalledExactlyOnceWith(first.lease)
+  })
+
+  it('does not replay an acknowledged release when the renderer is destroyed during the release', async () => {
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const host = harness.hosts[0]!
+    host.ready.resolve()
+    const window = harness.windows[0]!
+    const sender = window.webContents
+    const boot = await invoke(DESKTOP_IPC.boot) as { lease: string }
+    const release = Promise.withResolvers<undefined>()
+    host.releaseBootInjections.mockImplementationOnce(() => release.promise)
+    const releasing = Promise.resolve(invoke(DESKTOP_IPC.bootRelease, 'app', boot.lease))
+    await vi.waitFor(() => { expect(host.releaseBootInjections).toHaveBeenCalledOnce() })
+    windowDestroyed(window)
+    sender.isDestroyed = () => true
+    release.resolve(undefined)
+    await releasing
+    await vi.advanceTimersByTimeAsync(0)
+    expect(host.releaseBootInjections).toHaveBeenCalledExactlyOnceWith(boot.lease)
+  })
+
+  it('does not retry a failed release after renderer destruction', async () => {
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const host = harness.hosts[0]!
+    host.ready.resolve()
+    const window = harness.windows[0]!
+    const sender = window.webContents
+    const boot = await invoke(DESKTOP_IPC.boot) as { lease: string }
+    const release = Promise.withResolvers<undefined>()
+    host.releaseBootInjections.mockImplementationOnce(() => release.promise)
+    const releasing = Promise.resolve(invoke(DESKTOP_IPC.bootRelease, 'app', boot.lease))
+    await vi.waitFor(() => { expect(host.releaseBootInjections).toHaveBeenCalledOnce() })
+    windowDestroyed(window)
+    sender.isDestroyed = () => true
+    release.reject(new Error('release acknowledgement lost'))
+    await expect(releasing).resolves.toBeUndefined()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(host.releaseBootInjections).toHaveBeenCalledExactlyOnceWith(boot.lease)
+  })
+
+  it('does not replay a release whose acknowledgement was lost after renderer destruction begins', async () => {
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const host = harness.hosts[0]!
+    host.ready.resolve()
+    const window = harness.windows[0]!
+    const boot = await invoke(DESKTOP_IPC.boot) as { lease: string }
+    const release = Promise.withResolvers<undefined>()
+    host.releaseBootInjections.mockImplementationOnce(() => release.promise)
+    const releasing = Promise.resolve(invoke(DESKTOP_IPC.bootRelease, 'app', boot.lease))
+    await vi.waitFor(() => { expect(host.releaseBootInjections).toHaveBeenCalledOnce() })
+    const sender = window.webContents
+    windowDestroyed(window)
+    sender.isDestroyed = () => true
+    release.reject(new Error('release acknowledgement lost'))
+    await expect(releasing).resolves.toBeUndefined()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(host.releaseBootInjections).toHaveBeenCalledExactlyOnceWith(boot.lease)
+  })
+
+  it('drains a pending boot before stopping the backend for the installer', async () => {
+    const host = await readyForUpdate()
+    const first = await invoke(DESKTOP_IPC.boot) as { lease: string }
+    const pendingBoot = Promise.withResolvers<{ injections: readonly unknown[]; lease: string }>()
+    host.bootInjections.mockImplementationOnce(() => pendingBoot.promise)
+    const second = Promise.resolve(invoke(DESKTOP_IPC.boot)) as Promise<{ lease: string }>
+    await vi.waitFor(() => { expect(host.bootInjections).toHaveBeenCalledTimes(2) })
+
+    harness.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 })
+    const preparing = harness.prepareUpdate()
+    await vi.waitFor(() => { expect(host.releaseBootInjections).toHaveBeenCalledWith(first.lease) })
+    expect(host.releaseBootInjections).not.toHaveBeenCalledWith('boot-2')
+    await host.stopping.promise
+    expect(host.stop).toHaveBeenCalled()
+
+    pendingBoot.resolve({ injections: [], lease: 'boot-2' })
+    await expect(second).rejects.toThrow('desktop boot: Host changed before boot completed')
+    await vi.waitFor(() => { expect(host.releaseBootInjections).toHaveBeenCalledWith('boot-2') })
+    host.exited.resolve()
+    await expect(preparing).resolves.toBe(true)
+  })
+
+  it('releases outstanding boot leases before stopping the backend for the installer', async () => {
+    const host = await readyForUpdate()
+    const first = await invoke(DESKTOP_IPC.boot) as { lease: string }
+    host.bootInjections.mockResolvedValueOnce({ injections: [], lease: 'boot-2' })
+    const second = await invoke(DESKTOP_IPC.boot) as { lease: string }
+    expect(host.releaseBootInjections).toHaveBeenCalledExactlyOnceWith(first.lease)
+
+    harness.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 })
+    const preparing = harness.prepareUpdate()
+    await host.stopping.promise
+    expect(host.releaseBootInjections).toHaveBeenCalledWith(second.lease)
+    expect(host.releaseBootInjections.mock.invocationCallOrder.at(-1)!).toBeLessThan(host.stop.mock.invocationCallOrder[0]!)
+    host.exited.resolve()
+    await expect(preparing).resolves.toBe(true)
+  })
+
+  it('serializes concurrent boot requests so each lease is retained and released once', async () => {
+    const host = await readyForUpdate()
+    const firstBoot = Promise.withResolvers<{ injections: readonly unknown[]; lease: string }>()
+    host.bootInjections.mockReset()
+      .mockImplementationOnce(() => firstBoot.promise)
+      .mockResolvedValueOnce({ injections: [], lease: 'boot-2' })
+    const first = Promise.resolve(invoke(DESKTOP_IPC.boot)) as Promise<{ lease: string }>
+    const second = Promise.resolve(invoke(DESKTOP_IPC.boot)) as Promise<{ lease: string }>
+    await vi.waitFor(() => { expect(host.bootInjections).toHaveBeenCalledOnce() })
+    firstBoot.resolve({ injections: [], lease: 'boot-1' })
+    await expect(first).resolves.toMatchObject({ lease: 'boot-1' })
+    await expect(second).resolves.toMatchObject({ lease: 'boot-2' })
+    expect(host.releaseBootInjections).toHaveBeenCalledExactlyOnceWith('boot-1')
+
+    await invoke(DESKTOP_IPC.bootRelease, 'app', 'boot-2')
+    expect(host.releaseBootInjections).toHaveBeenCalledTimes(2)
+    expect(host.releaseBootInjections).toHaveBeenLastCalledWith('boot-2')
+  })
+
+  it('discards a lease acquired from a Host that was replaced before boot completed', async () => {
+    const host = await readyForUpdate()
+    const pending = Promise.withResolvers<{ injections: readonly unknown[]; lease: string }>()
+    host.bootInjections.mockReset().mockImplementationOnce(() => pending.promise)
+    const boot = Promise.resolve(invoke(DESKTOP_IPC.boot))
+
+    harness.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 })
+    const preparing = harness.prepareUpdate()
+    await host.stopping.promise
+    host.exited.resolve()
+    await expect(preparing).resolves.toBe(true)
+
+    const restarted = harness.nextHostStart()
+    harness.publishUpdate({ phase: 'error', version: '1.0.1-nightly.1', failedOperation: 'install', message: 'Installer failed' })
+    await restarted
+    const replacement = harness.hosts[1]!
+    replacement.ready.resolve()
+    await vi.waitFor(() => { expect(harness.windows[0]!.urls).toEqual(['dsh-app://app/', 'dsh-app://app/']) })
+
+    pending.resolve({ injections: [], lease: 'stale' })
+    await expect(boot).rejects.toThrow('desktop boot: Host changed before boot completed')
+    expect(host.releaseBootInjections).toHaveBeenCalledWith('stale')
   })
 
   it('retains macOS native editing actions on right-click and only copy for selected read-only text', async () => {
@@ -1939,7 +2148,7 @@ describe('desktop main startup', () => {
     expect(replacement.updateTasks).not.toHaveBeenCalled()
     replacement.ready.resolve()
     await vi.waitFor(() => { expect(harness.windows[0]!.urls).toEqual(['dsh-app://app/', 'dsh-app://app/']) })
-    await expect(Promise.resolve(invoke(DESKTOP_IPC.boot))).resolves.toEqual({ injections: [], streamBaseUrl: 'http://127.0.0.1:3099' })
+    await expect(Promise.resolve(invoke(DESKTOP_IPC.boot))).resolves.toEqual({ injections: [], lease: 'boot-1', streamBaseUrl: 'http://127.0.0.1:3099' })
     if (mandatory) await answerMandatory('later')
     await expect(retry).resolves.toBe(false)
     expect(replacement.updateTasks.mock.calls).toEqual([['inspect']])
@@ -1948,6 +2157,74 @@ describe('desktop main startup', () => {
       expect(harness.windows).toHaveLength(1)
       expect(harness.windows[0]!.isDestroyed()).toBe(false)
     }
+  })
+
+  it('reopens boot admission after a failed Host replacement becomes ready', async () => {
+    const host = await readyForUpdate()
+    const original = harness.windows[0]!
+    harness.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 })
+    const preparing = harness.prepareUpdate()
+    await host.stopping.promise
+    host.exited.reject(new DesktopHostUncleanExitError('Task teardown failed after child exit'))
+    await expect(preparing).rejects.toMatchObject(new DesktopUpdatePreparationError('stop-failed', en.updateStopFailed, 'Task teardown failed after child exit'))
+
+    // Publishing the installer failure starts one replacement Host. Its Host
+    // becomes ready normally, but the delayed document asks for boot first.
+    const restart = harness.nextHostStart()
+    harness.publishUpdate({ phase: 'error', version: '1.0.1-nightly.1', failedOperation: 'install', message: 'Task teardown failed' })
+    await restart
+    const replacement = harness.hosts[1]!
+    replacement.ready.resolve()
+    await vi.waitFor(() => { expect(harness.windows[0]!.urls).toEqual(['dsh-app://app/', 'dsh-app://app/']) })
+
+    // Destroying the reloaded document while the Host prepares a response must not
+    // change the shared admission that the replacement window will use.
+    const pending = Promise.withResolvers<{ injections: readonly unknown[]; lease: string }>()
+    replacement.bootInjections.mockImplementationOnce(() => pending.promise)
+    const boot = Promise.resolve(invoke(DESKTOP_IPC.boot))
+    await vi.waitFor(() => { expect(replacement.bootInjections).toHaveBeenCalledOnce() })
+
+    windowDestroyed(original)
+    pending.resolve({ injections: [], lease: 'boot-2' })
+    await expect(boot).resolves.toEqual({
+      injections: [], lease: 'boot-2', streamBaseUrl: 'http://127.0.0.1:3080',
+    })
+
+    // The replacement window receives a fresh Host and can boot normally.
+    harness.app.emit('second-instance')
+    const window = harness.windows[1]!
+    await vi.waitFor(() => { expect(window.urls).toEqual(['dsh-app://app/']) })
+    replacement.bootInjections.mockResolvedValueOnce({ injections: [], lease: 'boot-3' })
+    const handler = harness.handlers.get(DESKTOP_IPC.boot)!
+    const replacementEvent = {
+      sender: window.webContents,
+      senderFrame: window.webContents.mainFrame,
+    }
+    await expect(Promise.resolve(handler(replacementEvent))).resolves.toEqual({
+      injections: [], lease: 'boot-3', streamBaseUrl: 'http://127.0.0.1:3080',
+    })
+  })
+
+  it('uses the startup promise created during installer recovery', async () => {
+    const host = await readyForUpdate()
+    harness.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 })
+    const preparing = harness.prepareUpdate()
+    await host.stopping.promise
+    host.exited.resolve()
+    await expect(preparing).resolves.toBe(true)
+
+    harness.dialog.showMessageBox.mockResolvedValue({ response: 1 })
+    const firstRestart = harness.nextHostStart()
+    harness.publishUpdate({ phase: 'error', version: '1.0.1-nightly.1', failedOperation: 'install', message: 'Installer failed' })
+    await firstRestart
+    const replacement = harness.hosts[1]!
+    replacement.url = 'http://127.0.0.1:3099/?token=replacement'
+    const request = Promise.resolve(invoke(DESKTOP_IPC.boot))
+    replacement.ready.resolve()
+    await vi.waitFor(() => { expect(harness.windows[0]!.urls).toEqual(['dsh-app://app/', 'dsh-app://app/']) })
+    await expect(request).resolves.toEqual({
+      injections: [], lease: 'boot-1', streamBaseUrl: 'http://127.0.0.1:3099',
+    })
   })
 
   it.each([false, true])('restores a confirmed non-graceful exit without approving installation, mandatory: %s', async (mandatory) => {

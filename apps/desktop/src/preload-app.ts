@@ -84,6 +84,7 @@ if (location.protocol === `${SCHEME}:` && location.hostname === 'app') {
   })
   contextBridge.exposeInMainWorld('dshDesktopBoot', {
     ready: () => ipcRenderer.invoke(DESKTOP_IPC.boot) as Promise<unknown>,
+    release: (lease: string) => ipcRenderer.invoke(DESKTOP_IPC.bootRelease, lease) as Promise<void>,
     failed: (message: string) => ipcRenderer.invoke(DESKTOP_IPC.bootFailed, message) as Promise<void>,
   })
   contextBridge.exposeInMainWorld('dshPlatform', {

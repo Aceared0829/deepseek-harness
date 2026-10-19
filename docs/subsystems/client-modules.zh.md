@@ -101,6 +101,8 @@ interface WebBootGraph {
 
 `GET`／`HEAD /plugins/??<package-a>/client.js,<package-b>/client.js&rev=<rev>` 寻址一份生成的 combo 脚本；单资源请求采用同一形式，也是 HMR 路径。脚本在首次 `GET` 时只拼接一次，并以 `sourceMappingURL` 结尾，该引用只携带 combo 查询串——`??<package-a>/client.js.map,<package-b>/client.js.map&rev=<rev>`，按脚本自身目录而非文档解析。启动、index 渲染、脚本 `GET` 和 `HEAD` 都不会读取 map 文件；首次 map `GET` 才会读取并校验这些文件、组合一份 Indexed Source Map v3，并缓存该 body。组件有自带 map 时直接用于对应 section；没有时则获得 identity section，其 `sourcesContent` 是捕获的 bundle，source 名取打包后的 `sourceURL` 或插件路由。每条启动请求 URL 按 UTF-8 字节计算都不超过 3 KiB；切分按更长的 map 形式计算。所有 application URL 都会预加载，所有 bootstrap URL 都会在图全局量与 Vite entry 之前执行。已物化响应使用长期 immutable 缓存。未知或被修改的资源列表、缺少 revision 及陈旧 revision 都返回 404，绝不提供其他字节，也不会让 SPA fallback 把 HTML 当作 JavaScript 返回；其他方法返回 405。注入行在每次 index 渲染时携带当前图，因此重新加载总是基于实时组合启动。
 
+`retainBootResponses()` 会保留当前图的启动 combo 脚本与 combo map，以及每条 row 的单资源回退 URL。载体在收集注入表之前立即取得租约，并在渲染进程完成插件启动 URL 的导入后释放。因此即使开发构建在这些 URL 被请求前又发布了数代产物，图和租约仍描述同一代。释放是幂等的，每个租约独立于 HMR 的上一代回退保留其启动响应。包内 chunk 仍按需读取，不属于租约：未被请求的旧 chunk 可能已被磁盘上的新字节替换，其响应计划会把新字节冒充为旧 revision。不在当前 revision 响应表内的 chunk URL 返回 404，无论该文件是否在重建前存在。
+
 ## 服务
 
 ```ts type-equiv
@@ -117,7 +119,7 @@ interface ClientArtifactBaseline {
 }
 ```
 
-`ClientModuleRegistry`（`ctx.clientModules`，定义于 [`packages/client/modules/src/index.ts`](../../packages/client/modules/src/index.ts)）暴露读取面与重建面；签名见生成的[服务目录](#ctxclientmodules--clientmoduleregistry)。`graph()` 返回当前组合出的图（两次变更之间是同一个稳定对象），`clientPath(id)` 返回 bundle 的绝对路径，`artifactBaseline(id)` 返回读取当前快照前捕获的 bundle stat 值。`fetchBundle()` 解析 HTTP 路由所使用的同一份惰性响应。`rebuilt(id)` 是变化后的 bundle 内容到达图的唯一入口：它从文件系统元数据派生 revision，只有 revision 变化才会读取新字节、重新组合图并发出通知。`onRebuilt` 按发生变化的 bundle 逐个触发并携带新 revision；`onGraphChanged` 在任何一次重新组合了图的 flush 之后触发（行的增删，或 rebuilt 带来的 revision 变化），并采用拉取模型——监听器自行重读 `graph()`。两条通知路径都会兜住监听器异常，因此一个抛错的订阅者既不能让后续订阅者被跳过，也不能杀死触发这次 flush 的一方。
+`ClientModuleRegistry`（`ctx.clientModules`，定义于 [`packages/client/modules/src/index.ts`](../../packages/client/modules/src/index.ts)）暴露读取面、启动保留面与重建面；签名见生成的[服务目录](#ctxclientmodules--clientmoduleregistry)。`graph()` 返回当前组合出的图（两次变更之间是同一个稳定对象），`clientPath(id)` 返回 bundle 的绝对路径，`artifactBaseline(id)` 返回读取当前快照前捕获的 bundle stat 值。`fetchBundle()` 解析 HTTP 路由所使用的同一份惰性响应。`retainBootResponses()` 为当前图快照启动 combo、combo map 与 row 回退响应，并返回一个幂等释放函数，不影响其他租约。`rebuilt(id)` 是变化后的 bundle 内容到达图的唯一入口：它从文件系统元数据派生 revision，只有 revision 变化才会读取新字节、重新组合图并发出通知。`onRebuilt` 按发生变化的 bundle 逐个触发并携带新 revision；`onGraphChanged` 在任何一次重新组合了图的 flush 之后触发（行的增删，或 rebuilt 带来的 revision 变化），并采用拉取模型——监听器自行重读 `graph()`。两条通知路径都会兜住监听器异常，因此一个抛错的订阅者既不能让后续订阅者被跳过，也不能杀死触发这次 flush 的一方。
 
 随包提供的 Web 组合通过 [`dsh-client-hmr`](../../packages/client/hmr/README.zh.md) 交付动态图快照。Host 立即转发现有图变化通知，重连会发送当前完整图。图描述浏览器的目标条目，不声明 Host 清理已经完成。产物轮询另外报告重建 revision。仅 source map 变化不会触发重载；新 combo-map URL 只会在 bundle revision 变化后出现，每份 map body 由其首次 `GET` 固定。Client Modules 校验快照，并将对账与重建串行协调；它持有启动创建的条目映射，负责单资源到达、异步移除、未使用模块与样式清理，以及页面本地重试状态。静态平台模块与 bootstrap 保持页面生命周期；Electron 安装属于独立流程。
 
@@ -192,6 +194,22 @@ onRebuilt(listener: (id: string, rev: string) => void): () => void
  * @returns the unsubscriber.
  */
 onGraphChanged(listener: () => void): () => void
+
+/**
+ * Retain the current graph's startup combo and map responses until the
+ * returned disposer runs. Acquire this lease immediately before collecting
+ * the boot injection table: the table and lease must describe the same graph,
+ * and the browser loads the advertised startup URLs after that collection
+ * returns.
+ *
+ * Package-local chunks are not part of this lease. Their bytes are read
+ * lazily, so an unrequested chunk under an older revision may already have
+ * been overwritten; retaining its response plan would serve different bytes
+ * under the old URL.
+ * The disposer is idempotent; releasing one lease leaves other leases intact.
+ * @returns Idempotent release for the startup response table of this graph.
+ */
+retainBootResponses(): () => void
 ```
 
 Source: [`packages/client/modules/src/index.ts`](../../packages/client/modules/src/index.ts)

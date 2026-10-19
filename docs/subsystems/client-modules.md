@@ -101,6 +101,8 @@ Package metadata — including the negative "not a client package" verdict — i
 
 `GET`/`HEAD /plugins/??<package-a>/client.js,<package-b>/client.js&rev=<rev>` addresses one generated combo script; a one-resource request uses the same form and is the HMR path. The script is concatenated once on its first `GET` and ends with a `sourceMappingURL` that carries the combo query alone — `??<package-a>/client.js.map,<package-b>/client.js.map&rev=<rev>`, resolved against the script's own directory rather than the document. The map files are not read by startup, index rendering, script `GET`, or `HEAD`; the first map `GET` reads and validates them, composes one Indexed Source Map v3, and caches that body. An authored component map supplies its section; a component without one receives an identity section whose `sourcesContent` is the captured bundle and whose source name is its packaged `sourceURL` or plugin route. Every startup request URL is at most 3 KiB measured as UTF-8 bytes; partitioning uses the longer map form. All application URLs are preloaded, and all bootstrap URLs execute before the graph global and Vite entry. Materialized responses use long-lived immutable caching. Unknown or altered resource lists, missing revisions, and stale revisions answer 404 rather than serving different bytes or letting the SPA fallback return HTML as JavaScript; other methods are 405. The injection rows carry the current graph on every index render, so a reload always boots against the live composition.
 
+`retainBootResponses()` retains the current graph's startup combo scripts and combo maps, plus the per-row single-resource fallback URLs. A carrier acquires the lease immediately before collecting the injection table, then releases it after the renderer finishes importing plugin startup URLs. The graph and lease therefore describe the same generation even when development builds publish several later generations before those URLs are requested. Release is idempotent, and each lease retains its startup responses independently of the one-generation HMR fallback. Package-local chunks stay lazy and are outside the lease: an unrequested old chunk may already have been replaced on disk, so its response plan would serve new bytes under an old revision. A chunk URL outside the current revision's response table returns 404, whether or not the file existed before the rebuild.
+
 ## The service
 
 ```ts type-equiv
@@ -117,7 +119,7 @@ interface ClientArtifactBaseline {
 }
 ```
 
-`ClientModuleRegistry` (`ctx.clientModules`, defined in [`packages/client/modules/src/index.ts`](../../packages/client/modules/src/index.ts)) exposes reads and the rebuild face; signatures are in the generated [service catalog](#ctxclientmodules--clientmoduleregistry). `graph()` returns the current composed graph (a stable object between changes), `clientPath(id)` returns the bundle's absolute path, and `artifactBaseline(id)` returns the bundle stat values captured before the current snapshot was read. `fetchBundle()` resolves the same lazy response used by the HTTP route. `rebuilt(id)` is the only entry point through which changed bundle content reaches the graph: it derives the revision from filesystem metadata, and only a revision change reads the new bytes, recomposes the graph, and notifies. `onRebuilt` fires per changed bundle with the new revision; `onGraphChanged` fires after any flush that recomposed the graph (row added or removed, or a rebuilt revision change) and is pull-model — listeners re-read `graph()`. Both notification paths contain listener exceptions so one throwing subscriber cannot skip later subscribers or kill whatever triggered the flush.
+`ClientModuleRegistry` (`ctx.clientModules`, defined in [`packages/client/modules/src/index.ts`](../../packages/client/modules/src/index.ts)) exposes reads, startup retention, and the rebuild face; signatures are in the generated [service catalog](#ctxclientmodules--clientmoduleregistry). `graph()` returns the current composed graph (a stable object between changes), `clientPath(id)` returns the bundle's absolute path, and `artifactBaseline(id)` returns the bundle stat values captured before the current snapshot was read. `fetchBundle()` resolves the same lazy response used by the HTTP route. `retainBootResponses()` snapshots the current graph's startup combo, combo-map, and row-fallback responses and returns an idempotent release that leaves other leases intact. `rebuilt(id)` is the only entry point through which changed bundle content reaches the graph: it derives the revision from filesystem metadata, and only a revision change reads the new bytes, recomposes the graph, and notifies. `onRebuilt` fires per changed bundle with the new revision; `onGraphChanged` fires after any flush that recomposed the graph (row added or removed, or a rebuilt revision change) and is pull-model — listeners re-read `graph()`. Both notification paths contain listener exceptions so one throwing subscriber cannot skip later subscribers or kill whatever triggered the flush.
 
 [`dsh-client-hmr`](../../packages/client/hmr/README.md) delivers live graph snapshots in the shipped Web composition. The Host forwards existing graph-change notifications immediately, and reconnect sends the current full graph. A graph describes desired browser entries without asserting that Host cleanup has completed. Its artifact poll separately reports rebuilt revisions. Source-map changes alone do not trigger a reload; a new combo-map URL appears only after a bundle revision changes, and each map body is fixed by its first `GET`. Client Modules validates snapshots and serializes reconciliation with those rebuilds; it owns the boot-created entry map, single-resource arrivals, asynchronous removal, unused-module/style cleanup and page-local retry status. Static platform modules and the bootstrap retain their page lifetime; Electron installation is a separate flow.
 
@@ -192,6 +194,22 @@ onRebuilt(listener: (id: string, rev: string) => void): () => void
  * @returns the unsubscriber.
  */
 onGraphChanged(listener: () => void): () => void
+
+/**
+ * Retain the current graph's startup combo and map responses until the
+ * returned disposer runs. Acquire this lease immediately before collecting
+ * the boot injection table: the table and lease must describe the same graph,
+ * and the browser loads the advertised startup URLs after that collection
+ * returns.
+ *
+ * Package-local chunks are not part of this lease. Their bytes are read
+ * lazily, so an unrequested chunk under an older revision may already have
+ * been overwritten; retaining its response plan would serve different bytes
+ * under the old URL.
+ * The disposer is idempotent; releasing one lease leaves other leases intact.
+ * @returns Idempotent release for the startup response table of this graph.
+ */
+retainBootResponses(): () => void
 ```
 
 Source: [`packages/client/modules/src/index.ts`](../../packages/client/modules/src/index.ts)

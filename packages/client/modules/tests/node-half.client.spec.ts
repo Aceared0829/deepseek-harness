@@ -732,6 +732,83 @@ describe('client bundle activation', () => {
     expect((await routeRequest(route, third)).status).toBe(200)
   })
 
+  it('retains an explicitly leased startup generation across several rebuilds', async () => {
+    const packageName = '@fixture/boot-response-lease'
+    const clientPath = writePackage(packageName)
+    mkdirSync(dirname(clientPath), { recursive: true })
+    writeFileSync(clientPath, 'module.exports = { generation: 1 }\n')
+    const { service, route } = constructWithRoute([packageName])
+    const release = service.retainBootResponses()
+    const firstRow = service.graph().entries[0]!
+    const first = service.graph().batches[0]!.url
+
+    writeFileSync(clientPath, 'module.exports = { generation: 200 }\n')
+    service.rebuilt(packageName)
+    const second = service.graph().batches[0]!.url
+    writeFileSync(clientPath, 'module.exports = { generation: 30000 }\n')
+    service.rebuilt(packageName)
+    const third = service.graph().batches[0]!.url
+
+    expect(new Set([first, second, third]).size).toBe(3)
+    expect((await routeRequest(route, first)).status).toBe(200)
+    expect((await routeRequest(route, mapUrl(first))).status).toBe(200)
+    expect((await routeRequest(route, firstRow.url)).status).toBe(200)
+    expect((await routeRequest(route, mapUrl(firstRow.url))).status).toBe(200)
+    release()
+    expect((await routeRequest(route, first)).status).toBe(404)
+    expect((await routeRequest(route, mapUrl(first))).status).toBe(404)
+    expect((await routeRequest(route, firstRow.url)).status).toBe(404)
+    expect((await routeRequest(route, mapUrl(firstRow.url))).status).toBe(404)
+  })
+
+  it('does not retain an unmaterialized package-local chunk under a prior startup lease', async () => {
+    const packageName = '@fixture/boot-response-lease-chunk'
+    const clientPath = writePackage(packageName)
+    const chunkPath = join(dirname(clientPath), 'client.terminal.js')
+    mkdirSync(dirname(clientPath), { recursive: true })
+    writeFileSync(clientPath, 'module.exports = { load: () => require.async("./client.terminal.js") }\n')
+    writeFileSync(chunkPath, 'module.exports = { generation: 1 }\n')
+    const { service, route } = constructWithRoute([packageName])
+    const release = service.retainBootResponses()
+    const firstRow = service.graph().entries[0]!
+    const firstChunk = chunkReference(packageName, 'client.terminal.js', firstRow.rev)
+
+    writeFileSync(clientPath, 'module.exports = { generation: 200 }\n')
+    const secondRev = service.rebuilt(packageName)!
+    const secondChunk = chunkReference(packageName, 'client.terminal.js', secondRev)
+
+    expect((await routeRequest(route, firstChunk)).status).toBe(404)
+    const second = await routeRequest(route, secondChunk)
+    expect(second.status).toBe(200)
+    expect(second.body.toString('utf8')).toContain('generation: 1')
+    expect((await routeRequest(route, firstChunk)).status).toBe(404)
+    release()
+  })
+
+  it('releases startup generations independently and idempotently', async () => {
+    const packageName = '@fixture/boot-response-lease-independent'
+    const clientPath = writePackage(packageName)
+    mkdirSync(dirname(clientPath), { recursive: true })
+    writeFileSync(clientPath, 'module.exports = { generation: 1 }\n')
+    const { service, route } = constructWithRoute([packageName])
+    const firstRelease = service.retainBootResponses()
+    const first = service.graph().batches[0]!.url
+    const secondRelease = service.retainBootResponses()
+
+    writeFileSync(clientPath, 'module.exports = { generation: 200 }\n')
+    service.rebuilt(packageName)
+    const second = service.graph().batches[0]!.url
+    writeFileSync(clientPath, 'module.exports = { generation: 30000 }\n')
+    service.rebuilt(packageName)
+
+    firstRelease()
+    firstRelease()
+    expect((await routeRequest(route, first)).status).toBe(200)
+    secondRelease()
+    expect((await routeRequest(route, first)).status).toBe(404)
+    expect((await routeRequest(route, second)).status).toBe(200)
+  })
+
   it('preserves artifact revisions across registry restarts and scan order changes', () => {
     const firstName = '@fixture/startup-revision-first'
     const secondName = '@fixture/startup-revision-second'

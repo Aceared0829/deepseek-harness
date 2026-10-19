@@ -115,7 +115,8 @@ vi.mock('../src/host-process.ts', () => ({
   DesktopHostProcess: class {
     start = state.startHost
     stop = state.stopHost
-    bootInjections = async () => []
+    bootInjections = async () => ({ injections: [], lease: 'welcome-boot' })
+    releaseBootInjections = async () => {}
     fetch() {
       return Promise.resolve(Response.json({
         loggedIn: false, hasApiKey: state.hasApiKey, writable: true, localePreference: state.preference,
