@@ -31,6 +31,11 @@ type DesktopHostEvent = ReadyEvent | FatalEvent | PlatformSessionEvent | { reado
   readonly type: 'boot-injections'
   readonly requestId: number
   readonly injections?: readonly unknown[]
+  readonly lease?: string
+  readonly error?: string
+} | {
+  readonly type: 'boot-injections-release'
+  readonly requestId: number
   readonly error?: string
 } | {
   readonly type: 'quit-inspection'
@@ -88,8 +93,12 @@ function isDesktopHostEvent(message: unknown): message is DesktopHostEvent {
         && (candidate.error === undefined || typeof candidate.error === 'string')
     case 'boot-injections':
       return Number.isSafeInteger(candidate.requestId)
-        && ((Array.isArray(candidate.injections) && candidate.error === undefined)
+        && ((Array.isArray(candidate.injections) && typeof candidate.lease === 'string' && candidate.lease.length > 0
+          && candidate.error === undefined)
           || (candidate.injections === undefined && typeof candidate.error === 'string'))
+    case 'boot-injections-release':
+      return Number.isSafeInteger(candidate.requestId)
+        && (candidate.error === undefined || typeof candidate.error === 'string')
     case 'quit-inspection':
       return Number.isSafeInteger(candidate.requestId) && typeof candidate.activeTasks === 'boolean'
         && typeof candidate.scheduledTasks === 'boolean' && (candidate.error === undefined || typeof candidate.error === 'string')
@@ -114,6 +123,12 @@ async function exitsWithin(exit: Promise<void>, milliseconds: number): Promise<b
 /** Browser authentication URL reported by the running Web application. */
 export interface DesktopHostReady {
   readonly url: string
+}
+
+/** Startup injection rows and the Host lease that keeps their resources resolvable. */
+export interface DesktopBootInjections {
+  readonly injections: readonly unknown[]
+  readonly lease: string
 }
 
 /** The child has exited, but task teardown did not finish successfully. */
@@ -265,20 +280,38 @@ export class DesktopHostProcess {
   }
 
   /**
-   * Collect the injection rows for the Host's current client bundle generation.
-   * @returns The current boot injection table.
+   * Collect the injection rows for the Host's current client bundle generation
+   * and retain its resources until {@link releaseBootInjections}.
+   * @returns The current boot injection table and its Host lease.
    */
-  async bootInjections(): Promise<readonly unknown[]> {
+  async bootInjections(): Promise<DesktopBootInjections> {
     const response = await this.control({ type: 'boot-injections' }, 10_000, 'desktop boot: injections timed out')
-    if (response.type !== 'boot-injections' || response.injections === undefined) {
-      throw new Error('desktop boot: Host answered without injections')
+    if (response.type !== 'boot-injections' || response.injections === undefined || response.lease === undefined) {
+      throw new Error(response.error === undefined
+        ? 'desktop boot: Host answered without injections'
+        : `desktop boot: ${response.error}`)
     }
-    return response.injections
+    return { injections: response.injections, lease: response.lease }
+  }
+
+  /**
+   * Release a startup injection lease after the renderer no longer needs its URLs.
+   * @param lease - Lease returned by {@link bootInjections}.
+   */
+  async releaseBootInjections(lease: string): Promise<void> {
+    if (lease === '') throw new Error('desktop boot: lease must not be empty')
+    const response = await this.control({ type: 'boot-injections-release', lease }, 10_000,
+      'desktop boot: lease release timed out')
+    if (response.type !== 'boot-injections-release') {
+      throw new Error('desktop boot: Host answered with a different control response')
+    }
+    if (response.error !== undefined) throw new Error(`desktop boot: ${response.error}`)
   }
 
   private async control(
     request: { readonly type: 'update-tasks'; readonly action: 'inspect' | 'lock' | 'unlock' }
-      | { readonly type: 'quit-inspection' } | { readonly type: 'boot-injections' },
+      | { readonly type: 'quit-inspection' } | { readonly type: 'boot-injections' }
+      | { readonly type: 'boot-injections-release'; readonly lease: string },
     deadlineMs: number, deadlineMessage: string,
   ): Promise<DesktopHostControlResponse> {
     const child = this.child

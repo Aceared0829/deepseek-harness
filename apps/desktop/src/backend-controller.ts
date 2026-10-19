@@ -1,6 +1,7 @@
 /** Owns one backend startup and its quiescent teardown independently of windows. */
 
 import { desktopErrorState } from './startup-error.ts'
+import type { DesktopBootInjections } from './host-process.ts'
 
 /** Backend availability presented by the desktop window. */
 export type DesktopBackendState =
@@ -20,6 +21,10 @@ export interface DesktopBackendHost {
   start(): Promise<unknown>
   /** @returns Completion of child exit. */
   stop(): Promise<void>
+  /** @returns Startup injection rows and the lease that retains their resources. */
+  bootInjections(): Promise<DesktopBootInjections>
+  /** @param lease - Host lease returned by {@link bootInjections}. */
+  releaseBootInjections(lease: string): Promise<void>
 }
 
 interface Attempt<Host> {

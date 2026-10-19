@@ -401,6 +401,82 @@ async function main(): Promise<void> {
   const applicationUrl = `${SCHEME}://app/`
   let hostUrl: string | undefined
   let hostCookie: string | undefined
+  interface BootLease {
+    readonly host: Pick<DesktopHostProcess, 'releaseBootInjections'>
+    readonly lease: string
+  }
+  const bootLeases = new Map<Electron.WebContents, BootLease>()
+  const bootOperations = new WeakMap<Electron.WebContents, Promise<void>>()
+  let bootAdmissionOpen = true
+  // A renderer can have only one boot request acquiring or releasing its lease at a time.
+  const runBootOperation = <T>(sender: Electron.WebContents, operation: () => Promise<T>): Promise<T> => {
+    const previous = bootOperations.get(sender) ?? Promise.resolve()
+    const result = previous.then(operation, operation)
+    const settled = result.then(() => undefined, () => undefined)
+    bootOperations.set(sender, settled)
+    void settled.then(() => {
+      if (bootOperations.get(sender) === settled) bootOperations.delete(sender)
+    })
+    return result
+  }
+  const bootError = (): Error => new Error(quitting
+    ? 'desktop boot: application is quitting'
+    : 'desktop boot: application is preparing to stop')
+  const assertBootAdmitted = (message: string): void => {
+    if (!quitting && bootAdmissionOpen) return
+    throw new Error(quitting ? 'desktop boot: application is quitting' : message)
+  }
+  // Closing admission invalidates requests already waiting on the Host while
+  // allowing update failures before Host replacement to accept future boots.
+  const drainBootAdmission = (): void => {
+    bootAdmissionOpen = false
+  }
+  const openBootAdmission = (): void => {
+    if (quitting) return
+    bootAdmissionOpen = true
+  }
+  const releaseBootLease = async (sender: Electron.WebContents, requested?: string): Promise<void> => {
+    const held = bootLeases.get(sender)
+    if (held === undefined || (requested !== undefined && held.lease !== requested)) return
+    bootLeases.delete(sender)
+    try {
+      await held.host.releaseBootInjections(held.lease)
+    } catch (error) {
+      if (!sender.isDestroyed() && bootAdmissionOpen) {
+        bootLeases.set(sender, held)
+        throw error
+      }
+      // The renderer cannot retry after destruction, and Host shutdown releases
+      // every retained lease when admission is draining.
+      return
+    }
+  }
+  const releaseBootLeases = async (): Promise<void> => {
+    const held = [...bootLeases]
+    const acknowledgements = held.map(async ([sender, boot]) => {
+      // Remove before awaiting so a renderer destroyed while the release is
+      // pending cannot replay an operation that may already have taken effect.
+      if (bootLeases.get(sender) === boot) bootLeases.delete(sender)
+      try {
+        await boot.host.releaseBootInjections(boot.lease)
+      } catch {
+        // Host shutdown owns every retained lease after admission is closed.
+      }
+    })
+    await Promise.allSettled(acknowledgements)
+    // A global sweep precedes Host shutdown, whose own lease map is
+    // authoritative after an acknowledgement was lost. Dropping these records
+    // avoids replaying an operation whose outcome is already unknown.
+  }
+  /** Stop new boot acquisition, resolve the Host request it may be waiting on, and settle held leases. */
+  const sweepBootLeases = async (): Promise<void> => {
+    drainBootAdmission()
+    await releaseBootLeases()
+  }
+  const failBootLeases = (): void => {
+    drainBootAdmission()
+    void releaseBootLeases().catch((error: unknown) => { console.error(error) })
+  }
   const browserGuests = new DesktopBrowserGuests(() => hostUrl)
   let welcomeBackend: DesktopWelcomeBackend | undefined
   let reportedLaunch = false
@@ -506,10 +582,14 @@ async function main(): Promise<void> {
       updateTasks: (action: 'inspect' | 'lock' | 'unlock') => host.updateTasks(action),
       inspectQuit: () => host.inspectQuit(),
       bootInjections: () => host.bootInjections(),
+      releaseBootInjections: lease => host.releaseBootInjections(lease),
     }
   }, (state) => {
-    if (state.phase === 'error') reportFatal(state.failure, 'host')
-    else if (!shuttingDown) backendReady = state.phase === 'ready'
+    if (state.phase === 'error') {
+      reportFatal(state.failure, 'host')
+      failBootLeases()
+    } else if (!shuttingDown) backendReady = state.phase === 'ready'
+    if (state.phase === 'ready') openBootAdmission()
   })
 
   const updateErrors = new WeakMap<DesktopUpdateState, Promise<void>>()
@@ -536,6 +616,7 @@ async function main(): Promise<void> {
       const restoreHost = state.failedOperation === 'install' && updateStoppedHost && !quitting
       shellInstallerOwnsQuit = false
       updateStoppedHost = false
+      if (!quitting && (backend.host !== undefined || restoreHost)) openBootAdmission()
       if (restoreHost) {
         // Only confirmed process exit permits replacement before another installation confirmation.
         const hostReady = backend.start(prepareHostEnvironment)
@@ -617,6 +698,7 @@ async function main(): Promise<void> {
         mandatoryUI?.preparingRestart(stillActive)
         // The embedded Platform document holds credentials issued by the Host that is about to stop.
         await platformView.closeAndWait()
+        await sweepBootLeases()
         requireCleanStop = true
         updateStopFailure = undefined
         await backend.stop()
@@ -686,12 +768,49 @@ async function main(): Promise<void> {
 
   ipcMain.handle(DESKTOP_IPC.boot, async (event) => {
     assertDesktopSender(event, ['app'])
-    await startup
-    const host = backend.host
-    if (host === undefined || hostUrl === undefined || typeof host.bootInjections !== 'function') {
-      throw new Error('Desktop Host is unavailable')
+    const owner = mainWindow
+    if (owner === undefined || owner.isDestroyed() || event.sender !== owner.webContents
+      || event.senderFrame !== owner.webContents.mainFrame) {
+      throw new Error('dsh desktop: rejected IPC from an unowned renderer')
     }
-    return { injections: await host.bootInjections(), streamBaseUrl: new URL(hostUrl).origin }
+    return runBootOperation(event.sender, async () => {
+      assertBootAdmitted(backend.host === undefined
+        ? 'desktop boot: application is starting'
+        : 'desktop boot: application is preparing to stop')
+      await releaseBootLease(event.sender)
+      // Installer recovery can replace the startup promise after this request
+      // enters the renderer queue, so read it after releasing the previous lease.
+      const currentStartup = startup
+      await currentStartup
+      const host = backend.host
+      if (quitting || host === undefined || hostUrl === undefined || typeof host.bootInjections !== 'function') {
+        throw new Error(quitting ? 'desktop boot: application is quitting' : 'Desktop Host is unavailable')
+      }
+      assertBootAdmitted('desktop boot: application is starting')
+      const boot = await host.bootInjections()
+      if (host !== backend.host) {
+        await host.releaseBootInjections(boot.lease).catch((error: unknown) => { console.error(error) })
+        throw new Error('desktop boot: Host changed before boot completed')
+      }
+      if (!bootAdmissionOpen) {
+        await host.releaseBootInjections(boot.lease).catch((error: unknown) => { console.error(error) })
+        throw bootError()
+      }
+      const held: BootLease = { host, lease: boot.lease }
+      bootLeases.set(event.sender, held)
+      return { ...boot, streamBaseUrl: new URL(hostUrl).origin }
+    })
+  })
+
+  ipcMain.handle(DESKTOP_IPC.bootRelease, async (event, lease: unknown) => {
+    assertDesktopSender(event, ['app'])
+    const owner = mainWindow
+    if (owner === undefined || event.sender !== owner.webContents
+      || event.senderFrame !== owner.webContents.mainFrame) {
+      throw new Error('dsh desktop: rejected IPC from an unowned renderer')
+    }
+    if (typeof lease !== 'string' || lease === '') throw new Error('desktop boot: lease must be non-empty text')
+    await runBootOperation(event.sender, () => releaseBootLease(event.sender, lease))
   })
 
   ipcMain.handle(DESKTOP_IPC.bootFailed, (event, message: unknown) => {
@@ -1073,6 +1192,10 @@ async function main(): Promise<void> {
   const createMainWindow = (): BrowserWindow => {
     const window = createWindow(appPreload, false, true)
     mainWindow = window
+    window.webContents.once('destroyed', () => {
+      void runBootOperation(window.webContents, () => releaseBootLease(window.webContents))
+        .catch((error: unknown) => { console.error(error) })
+    })
     browserGuests.bind(window, (guest, name) => shortcuts.attachGuest(window, guest, name))
     shortcuts.attach(window)
     window.on('focus', automaticCheck)
@@ -1259,9 +1382,12 @@ async function main(): Promise<void> {
     updateSchedule.dispose()
     updateDialog.dispose()
     mandatoryUI?.dispose()
-    void Promise.all([Promise.resolve(mandatoryPolicy?.dispose()).then(() => policyAuth?.dispose()), backend.close(),
+    void sweepBootLeases().then(() => Promise.all([
+      Promise.resolve(mandatoryPolicy?.dispose()).then(() => policyAuth?.dispose()),
+      backend.close(),
       // A Platform cleanup failure is logged without cutting the remaining Host shutdown short.
-      platformView.dispose().catch((error: unknown) => { console.error(error) })])
+      platformView.dispose().catch((error: unknown) => { console.error(error) }),
+    ]))
       .catch((error: unknown) => { console.error(error) }).finally(() => { app.quit() })
   }
   app.on('before-quit', (event) => {

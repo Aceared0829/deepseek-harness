@@ -620,6 +620,7 @@ export class ClientModuleRegistry extends Service {
   private batchResponses = new Map<string, LazyResponse>()
   /** One prior graph generation covers a request racing the HMR recomposition that replaced its URL. */
   private previousBatchResponses = new Map<string, LazyResponse>()
+  private readonly retainedBootResponses = new Set<ReadonlyMap<string, LazyResponse>>()
   private flushQueued = false
   private composed: WebBootGraph
 
@@ -769,6 +770,41 @@ export class ClientModuleRegistry extends Service {
   onGraphChanged(listener: () => void): () => void {
     this.graphListeners.add(listener)
     return () => { this.graphListeners.delete(listener) }
+  }
+
+  /**
+   * Retain the current graph's startup combo and map responses until the
+   * returned disposer runs. Acquire this lease immediately before collecting
+   * the boot injection table: the table and lease must describe the same graph,
+   * and the browser loads the advertised startup URLs after that collection
+   * returns.
+   *
+   * Package-local chunks are not part of this lease. Their bytes are read
+   * lazily, so an unrequested chunk under an older revision may already have
+   * been overwritten; retaining its response plan would serve different bytes
+   * under the old URL.
+   * The disposer is idempotent; releasing one lease leaves other leases intact.
+   * @returns Idempotent release for the startup response table of this graph.
+   */
+  retainBootResponses(): () => void {
+    // Snapshot both the startup descriptor URLs and the per-row fallback URLs
+    // the browser can request while those startup scripts are arriving.
+    const responses = new Map(this.batchResponses)
+    for (const row of this.composed.entries) {
+      const base = `/${row.url}`
+      const sourceMap = base.replace(/\/client\.js(?=,|&rev=)/g, '/client.js.map')
+      for (const url of [base, sourceMap]) {
+        const response = this.responses.get(url)
+        if (response !== undefined) responses.set(url, response)
+      }
+    }
+    this.retainedBootResponses.add(responses)
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      this.retainedBootResponses.delete(responses)
+    }
   }
 
   private compose(): WebBootGraph {
@@ -1158,9 +1194,8 @@ export class ClientModuleRegistry extends Service {
     if (method !== 'GET' && method !== 'HEAD') return { status: 405 }
     const requestUrl = new URL(url, 'http://x')
     const resourceUrl = `${requestUrl.pathname}${requestUrl.search}`
-    const response = this.responses.get(resourceUrl)
-      ?? this.previousBatchResponses.get(resourceUrl)
-      ?? this.chunkResponse(requestUrl)
+    const response = this.responses.get(resourceUrl) ?? this.retainedResponse(resourceUrl)
+      ?? this.previousBatchResponses.get(resourceUrl) ?? this.chunkResponse(requestUrl)
     if (response !== undefined) {
       return {
         status: 200,
@@ -1171,6 +1206,14 @@ export class ClientModuleRegistry extends Service {
     // Anything else under /plugins (including unadvertised combinations and
     // /plugins/events when the HMR row is absent) is an unknown resource.
     return { status: 404 }
+  }
+
+  private retainedResponse(resourceUrl: string): LazyResponse | undefined {
+    for (const responses of this.retainedBootResponses) {
+      const response = responses.get(resourceUrl)
+      if (response !== undefined) return response
+    }
+    return undefined
   }
 
   private readonly serveBundle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {

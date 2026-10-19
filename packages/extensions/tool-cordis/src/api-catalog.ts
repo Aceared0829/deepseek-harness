@@ -634,6 +634,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [{ name: 'listener', description: 'notified with no payload.' }],
         returns: 'the unsubscriber.',
       },
+      {
+        signature: 'retainBootResponses(): () => void',
+        description: 'Retain the current graph\'s startup combo and map responses until the returned disposer runs. Acquire this lease immediately before collecting the boot injection table: the table and lease must describe the same graph, and the browser loads the advertised startup URLs after that collection returns.\n\nPackage-local chunks are not part of this lease. Their bytes are read lazily, so an unrequested chunk under an older revision may already have been overwritten; retaining its response plan would serve different bytes under the old URL. The disposer is idempotent; releasing one lease leaves other leases intact.',
+        parameters: [],
+        returns: 'Idempotent release for the startup response table of this graph.',
+      },
     ],
   },
   {

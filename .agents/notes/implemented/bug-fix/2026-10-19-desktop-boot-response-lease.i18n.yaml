@@ -1,0 +1,22 @@
+# Bilingual-pair consistency record for 2026-10-19-desktop-boot-response-lease.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-10-19-desktop-boot-response-lease.md
+/agent-note-retain-desktop-startup-responses-through-renderer-boot:
+  en: 5542e0ceb02b68b5
+  zh: 9922a672c8c4de5a
+/agent-note-retain-desktop-startup-responses-through-renderer-boot/problem:
+  en: 2997400bf178c9b6
+  zh: b3886eb8a1fb1029
+/agent-note-retain-desktop-startup-responses-through-renderer-boot/decision:
+  en: bf7256e1c420b43c
+  zh: 90cf893d04782914
+/agent-note-retain-desktop-startup-responses-through-renderer-boot/alternatives-considered:
+  en: 5003a025bf440da3
+  zh: 76e1cc8e4a4b472c
+/agent-note-retain-desktop-startup-responses-through-renderer-boot/consequences:
+  en: d9ee3ae380695f15
+  zh: ebdd286511e6a4ca
+/agent-note-retain-desktop-startup-responses-through-renderer-boot/verification:
+  en: 077cb2ed9cab0fbe
+  zh: 3fe60c7d9018a063

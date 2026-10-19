@@ -5,6 +5,7 @@ import { inspect } from 'node:util'
 import { loadLayeredEnv, loadProfileDirectory, reportSkippedBundles } from '@deepseek-ai/dsh-app-boot'
 import { runProfile } from '@deepseek-ai/dsh/profile-boot'
 import type {} from '@deepseek-ai/dsh-client-connection'
+import type {} from '@deepseek-ai/dsh-client-modules'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-deepseek-account'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
@@ -44,13 +45,14 @@ async function main(): Promise<void> {
   const control: {
     updateTasks?: ReturnType<typeof installDesktopUpdateTaskControl>
     quitInspection?: ReturnType<typeof installDesktopQuitInspection>
-    indexInjections?: () => readonly unknown[]
+    bootInjections?: () => { injections: readonly unknown[]; lease: string }
   } = {}
-  const send = (message: object): Promise<void> => new Promise((resolve, reject) => {
-    if (!process.connected || process.send === undefined) { resolve(); return }
-    process.send(message, (error) => { if (error === null) resolve(); else reject(error) })
-  })
+  const bootLeases = new Map<string, () => void>()
+  let nextBootLease = 1
+  const send = createIpcSender(process)
   const stop = (): Promise<void> => stopping ??= (async () => {
+    for (const release of bootLeases.values()) release()
+    bootLeases.clear()
     // Startup failure is reported by main; shutdown only owns a tree that booted.
     const running = await application.catch(() => undefined)
     await running?.shutdown.shutdown(0)
@@ -80,13 +82,42 @@ async function main(): Promise<void> {
       if (!('requestId' in message) || !Number.isSafeInteger(message.requestId)) return
       const requestId = message.requestId
       void (async () => {
+        let lease: string | undefined
         try {
-          if (stopping !== undefined || control.indexInjections === undefined) throw new Error('desktop boot: Host is unavailable')
-          await send({ type: 'boot-injections', requestId, injections: control.indexInjections() })
+          if (stopping !== undefined || control.bootInjections === undefined) throw new Error('desktop boot: Host is unavailable')
+          const boot = control.bootInjections()
+          lease = boot.lease
+          try {
+            await send({ type: 'boot-injections', requestId, ...boot })
+          } catch (error) {
+            bootLeases.get(boot.lease)?.()
+            bootLeases.delete(boot.lease)
+            throw error
+          }
         } catch (error) {
           await send({ type: 'boot-injections', requestId, error: error instanceof Error ? error.message : String(error) })
+            .catch((failure: unknown) => {
+              if (lease !== undefined) {
+                bootLeases.get(lease)?.()
+                bootLeases.delete(lease)
+              }
+              console.error(failure)
+            })
         }
       })().catch((error: unknown) => { console.error(error) })
+      return
+    }
+    if (message.type === 'boot-injections-release') {
+      if (!('requestId' in message) || !Number.isSafeInteger(message.requestId)
+        || !('lease' in message) || typeof message.lease !== 'string') return
+      const requestId = message.requestId
+      const release = bootLeases.get(message.lease)
+      if (release !== undefined) {
+        bootLeases.delete(message.lease)
+        release()
+      }
+      void send({ type: 'boot-injections-release', requestId })
+        .catch((error: unknown) => { console.error(error) })
       return
     }
     if (message.type !== 'update-tasks' || !('requestId' in message) || !Number.isSafeInteger(message.requestId)
@@ -106,17 +137,31 @@ async function main(): Promise<void> {
   const { ctx } = await application
   control.updateTasks = installDesktopUpdateTaskControl(ctx)
   control.quitInspection = installDesktopQuitInspection(ctx)
-  control.indexInjections = () => ctx.webServer.collectIndexInjections()
+  control.bootInjections = () => {
+    const clientModules = ctx.get('clientModules')
+    if (clientModules === undefined) throw new Error('desktop boot: client modules are unavailable')
+    const release = clientModules.retainBootResponses()
+    try {
+      const injections = ctx.webServer.collectIndexInjections()
+      const lease = `boot-${String(nextBootLease)}`
+      nextBootLease += 1
+      bootLeases.set(lease, release)
+      return { injections, lease }
+    } catch (error) {
+      release()
+      throw error
+    }
+  }
   await ctx.plugin(desktopOffice, {
     runtimeDir,
     source: process.argv[4] ?? join(runtimeDir, '..', 'runtime', 'primary-runtime'),
     root: join(resolveDshHome(), 'dsh-runtimes', 'dsh-primary-runtime'),
   })
   installPlatformSessionPublisher(ctx, (session) => {
-    if (process.connected) process.send?.({ type: 'platform-session', session })
+    void send({ type: 'platform-session', session }).catch((error: unknown) => { console.error(error) })
   })
   const url = ctx.connection.authenticatedUrl(`${ctx.webServer.protocol}//127.0.0.1:${String(ctx.webServer.port)}`)
-  if (process.connected) process.send?.({ type: 'ready', url }, (error) => { if (error !== null) console.error(error) })
+  await send({ type: 'ready', url })
 }
 
 /** Upper bound of the startup diagnostic carried over IPC; the head holds the message and stack. */
@@ -129,9 +174,34 @@ if (import.meta.main) {
     // stderr bytes and this IPC message race, and the shell reports the first
     // failure it sees.
     const diagnostic = inspect(error, { depth: 4, maxArrayLength: 50 }).slice(0, MAX_FATAL_DIAGNOSTIC_CHARS)
-    if (process.connected) process.send?.({ type: 'fatal', message, diagnostic }, (error) => { if (error !== null) console.error(error) })
+    // This path runs without the main closure, so keep the receiver assignment local.
+    const write = process.send?.bind(process)
+    if (process.connected && write !== undefined) {
+      write({ type: 'fatal', message, diagnostic }, (error) => { if (error !== null) console.error(error) })
+    }
     console.error(error)
     process.exitCode = 1
     if (process.connected) process.disconnect()
+  })
+}
+
+/** The process surface used to send one lifecycle message. */
+interface IpcProcess {
+  /** Whether the parent IPC channel still accepts writes. */
+  readonly connected: boolean
+  /** Writes one lifecycle message; omitted when no IPC channel was created. */
+  readonly send?: (this: IpcProcess, message: object, callback: (error: Error | null) => void) => boolean
+}
+
+/**
+ * Write one lifecycle message without detaching the method from its process.
+ * Electron's Node-mode `process.send` requires the process as `this`, unlike
+ * the pre-bound method exposed by a plain Node child.
+ */
+export function createIpcSender(target: IpcProcess): (message: object) => Promise<void> {
+  return message => new Promise((resolve, reject) => {
+    const write = target.send
+    if (!target.connected || write === undefined) { resolve(); return }
+    write.call(target, message, (error) => { if (error === null) resolve(); else reject(error) })
   })
 }
