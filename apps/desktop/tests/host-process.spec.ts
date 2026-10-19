@@ -30,6 +30,12 @@ server.listen(0, '127.0.0.1', () => {
   process.send({ type: 'ready', url: 'http://127.0.0.1:' + server.address().port + '/?token=fixture' })
 })
 process.on('message', message => {
+  if (message.type === 'boot-injections') {
+    process.send({ type: 'boot-injections', requestId: message.requestId, injections: [
+      { kind: 'script-src', placement: 'head', src: '/plugins/??current/client.js&rev=current' },
+    ] })
+    return
+  }
   if (message.type === 'update-tasks') {
     process.send({ type: 'update-tasks', requestId: message.requestId, active: message.action === 'lock' })
     return
@@ -95,6 +101,36 @@ describe('desktop host process', () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(QUIT_INSPECTION_DEADLINE_MS - 50)
     expect(await host.inspectQuit()).toEqual({ activeTasks: false, scheduledTasks: false })
   }, 15_000)
+
+  it('collects fresh boot injections for every request instead of reusing Host readiness', async () => {
+    const host = hostProcess(projectWithHost())
+    await expect(host.bootInjections()).rejects.toThrow('desktop boot: Host is unavailable')
+    await host.start()
+    await expect(host.bootInjections()).resolves.toEqual([
+      { kind: 'script-src', placement: 'head', src: '/plugins/??current/client.js&rev=current' },
+    ])
+  })
+
+  it('rejects a Host that answers a boot request with another control response', async () => {
+    const host = hostProcess(projectWithHost(`
+      process.send({ type: 'ready', url: 'http://127.0.0.1:3080/' })
+      process.on('message', message => {
+        if (message.type === 'boot-injections') process.send({ type: 'update-tasks', requestId: message.requestId, active: false })
+        if (message.type === 'shutdown') process.send({ type: 'shutdown-complete' }, () => process.disconnect())
+      })
+    `))
+    await host.start()
+    await expect(host.bootInjections()).rejects.toThrow('desktop boot: Host answered without injections')
+  })
+
+  it.each([
+    ["process.send({ type: 'ready', url: 'http://127.0.0.1:3080/', injections: [] })", 'invalid IPC event'],
+    ["process.send({ type: 'boot-injections', requestId: 1, injections: [], error: 'conflict' })", 'invalid IPC event'],
+    ["process.send({ type: 'boot-injections', requestId: 1 })", 'invalid IPC event'],
+  ])('rejects malformed Host IPC before it can reach boot injection consumers: %s', async (source, message) => {
+    const host = hostProcess(projectWithHost(source))
+    await expect(host.start()).rejects.toThrow(message)
+  })
 
   it.each([
     'process.exit(17)',

@@ -8,7 +8,6 @@ import { desktopNodeEnvironment } from './node-environment.ts'
 interface ReadyEvent {
   readonly type: 'ready'
   readonly url: string
-  readonly injections?: readonly unknown[] | undefined
 }
 
 interface FatalEvent {
@@ -27,6 +26,11 @@ type DesktopHostEvent = ReadyEvent | FatalEvent | PlatformSessionEvent | { reado
   readonly type: 'update-tasks'
   readonly requestId: number
   readonly active: boolean
+  readonly error?: string
+} | {
+  readonly type: 'boot-injections'
+  readonly requestId: number
+  readonly injections?: readonly unknown[]
   readonly error?: string
 } | {
   readonly type: 'quit-inspection'
@@ -57,7 +61,7 @@ function isDesktopHostEvent(message: unknown): message is DesktopHostEvent {
     case 'shutdown-complete':
       return true
     case 'ready':
-      return typeof candidate.url === 'string'
+      return typeof candidate.url === 'string' && candidate.injections === undefined
     case 'platform-session': {
       const session = candidate.session
       if (session === null) return true
@@ -82,6 +86,10 @@ function isDesktopHostEvent(message: unknown): message is DesktopHostEvent {
     case 'update-tasks':
       return Number.isSafeInteger(candidate.requestId) && typeof candidate.active === 'boolean'
         && (candidate.error === undefined || typeof candidate.error === 'string')
+    case 'boot-injections':
+      return Number.isSafeInteger(candidate.requestId)
+        && ((Array.isArray(candidate.injections) && candidate.error === undefined)
+          || (candidate.injections === undefined && typeof candidate.error === 'string'))
     case 'quit-inspection':
       return Number.isSafeInteger(candidate.requestId) && typeof candidate.activeTasks === 'boolean'
         && typeof candidate.scheduledTasks === 'boolean' && (candidate.error === undefined || typeof candidate.error === 'string')
@@ -106,7 +114,6 @@ async function exitsWithin(exit: Promise<void>, milliseconds: number): Promise<b
 /** Browser authentication URL reported by the running Web application. */
 export interface DesktopHostReady {
   readonly url: string
-  readonly injections?: readonly unknown[] | undefined
 }
 
 /** The child has exited, but task teardown did not finish successfully. */
@@ -209,7 +216,7 @@ export class DesktopHostProcess {
         child.kill('SIGTERM')
         return
       }
-      if (message.type === 'ready') this.readyResolve({ url: message.url, injections: message.injections })
+      if (message.type === 'ready') this.readyResolve({ url: message.url })
       else if (message.type === 'platform-session') this.onPlatformSession?.(message.session)
       else if (message.type === 'shutdown-complete') {
         if (this.stopping) this.shutdownCompleted = true
@@ -257,13 +264,28 @@ export class DesktopHostProcess {
     return { activeTasks: response.activeTasks, scheduledTasks: response.scheduledTasks }
   }
 
+  /**
+   * Collect the injection rows for the Host's current client bundle generation.
+   * @returns The current boot injection table.
+   */
+  async bootInjections(): Promise<readonly unknown[]> {
+    const response = await this.control({ type: 'boot-injections' }, 10_000, 'desktop boot: injections timed out')
+    if (response.type !== 'boot-injections' || response.injections === undefined) {
+      throw new Error('desktop boot: Host answered without injections')
+    }
+    return response.injections
+  }
+
   private async control(
-    request: { readonly type: 'update-tasks'; readonly action: 'inspect' | 'lock' | 'unlock' } | { readonly type: 'quit-inspection' },
+    request: { readonly type: 'update-tasks'; readonly action: 'inspect' | 'lock' | 'unlock' }
+      | { readonly type: 'quit-inspection' } | { readonly type: 'boot-injections' },
     deadlineMs: number, deadlineMessage: string,
   ): Promise<DesktopHostControlResponse> {
     const child = this.child
     if (child === undefined || !child.connected || this.failureReported || this.stopping) {
-      throw new Error(`${request.type === 'update-tasks' ? 'desktop update' : 'desktop quit'}: Host is unavailable`)
+      const subject = request.type === 'update-tasks' ? 'desktop update'
+        : request.type === 'quit-inspection' ? 'desktop quit' : 'desktop boot'
+      throw new Error(`${subject}: Host is unavailable`)
     }
     const requestId = this.nextControlId++
     let timer: ReturnType<typeof setTimeout> | undefined

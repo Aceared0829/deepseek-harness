@@ -132,12 +132,13 @@ const harness = await vi.hoisted(async () => {
   class FakeHost {
     readonly updateTasks = vi.fn(async (_action: 'inspect' | 'lock' | 'unlock') => false)
     readonly inspectQuit = vi.fn(async () => ({ activeTasks: false, scheduledTasks: false }))
+    readonly bootInjections = vi.fn(async () => [] as readonly unknown[])
     url = 'http://127.0.0.1:3080/?token=test'
     fetch = vi.fn(async () => Response.json({ hasApiKey: true, writable: true, localePreference: null }))
     readonly ready = deferred()
     readonly exited = deferred()
     readonly stopping = deferred()
-    readonly start = vi.fn(() => { hostStarted.resolve(); return this.ready.promise.then(() => ({ url: this.url, injections: [] })) })
+    readonly start = vi.fn(() => { hostStarted.resolve(); return this.ready.promise.then(() => ({ url: this.url })) })
     readonly stop = vi.fn(() => {
       this.stopping.resolve()
       this.ready.reject(new Error('child stopped'))
@@ -1134,6 +1135,28 @@ describe('desktop main startup', () => {
     harness.hosts[0]!.ready.resolve()
     await expect(boot).resolves.toEqual({ injections: [], streamBaseUrl: 'http://127.0.0.1:3080' })
     expect(harness.windows[0]!.urls).toEqual(['dsh-app://app/'])
+  })
+
+  it('reads current boot injections for each request instead of retaining Host readiness', async () => {
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const instance = harness.hosts.at(-1)!
+    instance.bootInjections.mockResolvedValueOnce([
+      { kind: 'script-src', placement: 'head', src: '/plugins/??first/client.js&rev=first' },
+    ]).mockResolvedValueOnce([
+      { kind: 'script-src', placement: 'head', src: '/plugins/??second/client.js&rev=second' },
+    ])
+    instance.ready.resolve()
+    const event = { senderFrame: { url: 'dsh-app://app/' } }
+    await expect(Promise.resolve(harness.handlers.get(DESKTOP_IPC.boot)!(event))).resolves.toMatchObject({
+      injections: [{ src: '/plugins/??first/client.js&rev=first' }],
+    })
+    await expect(Promise.resolve(harness.handlers.get(DESKTOP_IPC.boot)!(event))).resolves.toMatchObject({
+      injections: [{ src: '/plugins/??second/client.js&rev=second' }],
+    })
+    expect(instance.bootInjections).toHaveBeenCalledTimes(2)
   })
 
   it('retains macOS native editing actions on right-click and only copy for selected read-only text', async () => {
