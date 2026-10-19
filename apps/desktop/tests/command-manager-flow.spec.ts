@@ -37,6 +37,7 @@ async function fixture(options: {
   managed?: boolean
   shadowed?: boolean
   elevate?: boolean
+  installed?: boolean
   messages?: DesktopMessages
 } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'dsh-command-dialog-'))
@@ -82,13 +83,24 @@ async function fixture(options: {
   ].join('\n'))
   const show = vi.fn<(options: MessageBoxOptions) => Promise<MessageBoxReturnValue>>()
   const manager = new DesktopCommandManager({
-    resources, isPackaged: true, isInstalledLocation: () => true, isInstalling: () => false, isQuitting: () => false,
+    resources, isInstalledLocation: () => options.installed ?? true,
+    isInstalling: () => false, isQuitting: () => false,
     messages: () => options.messages ?? en, show,
   })
   const calls = async (): Promise<Array<{ operation: string; expected?: string }>> =>
     (await readFile(join(worker, 'calls.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { operation: string; expected?: string })
-  return { manager, show, calls }
+  return { manager, show, calls, worker }
 }
+
+it('asks for an Applications-folder installation when a packaged build was moved', async () => {
+  const f = await fixture({ installed: false })
+  f.show.mockResolvedValue({ response: 0, checkboxChecked: false })
+  await f.manager.show()
+  expect(f.show).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+    type: 'info', title: en.cliCommandTitle, message: en.cliCommandInstallApp, buttons: [en.cliCommandClose],
+  }))
+  await expect(readFile(join(f.worker, 'calls.jsonl'), 'utf8')).rejects.toThrow()
+})
 
 it('requires confirmation before replacing an existing command', async () => {
   const f = await fixture()

@@ -1015,6 +1015,14 @@ describe('desktop main startup', () => {
     expect(harness.menu.setApplicationMenu).toHaveBeenCalledOnce()
   })
 
+  it.each(['darwin', 'win32'] as const)('omits command management from an unpackaged build on %s', async (platform) => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue(platform)
+    harness.app.isPackaged = false
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    expect(applicationMenuItems().map(item => item.label)).not.toContain(en.cliCommandMenu)
+  })
+
   it.each(['en-US', 'zh-CN'])('localizes macOS application commands without changing the application name (%s)', async (locale) => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
     vi.spyOn(harness.app, 'getLocale').mockReturnValue(locale)
