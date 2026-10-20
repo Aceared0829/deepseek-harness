@@ -19,7 +19,7 @@
  *   --bundle <dir>      the bundle package directory (required)
  *   --module <spec>     module inside it exporting the plugin (default: lib/index.js)
  *   --client <spec>     browser half, mounted through the module loader
- *   --fixtures <dir>    directory of real input files, or a glob-free path list
+ *   --fixtures <path>   a directory of real input files, or one such file
  *   --helper <spec>     module exporting review(inputPath) -> { steps, render? }
  *                       for a bundle whose pipeline this script cannot guess
  *   --max-state <n>     byte budget for the persisted state (default 131072)
@@ -124,7 +124,7 @@ function printUsage() {
   --bundle <dir>    bundle package directory (required)
   --module <spec>   host module inside it (default lib/index.js)
   --client <spec>   browser half (default lib/client.js)
-  --fixtures <dir>  real input files to fold
+  --fixtures <path> a directory of real input files, or one such file
   --helper <spec>   module exporting review(inputPath)
   --max-state <n>   byte budget for persisted state (default 131072)
   --limit <n>       newest N fixtures only
@@ -138,20 +138,75 @@ Exit: 0 pass, 1 failed, 2 nothing to check, 3 unverifiable.`)
  * @param value - value to walk.
  * @param path - current path label.
  * @param out - accumulator.
+ * @param seen - objects already walked, so a cycle cannot overflow the stack.
  * @returns the offending paths.
  */
-function undefinedPaths(value, path = '$', out = []) {
+function undefinedPaths(value, path = '$', out = [], seen = new WeakSet()) {
   if (value === undefined) {
     out.push(path)
     return out
   }
   if (value === null || typeof value !== 'object') return out
+  if (seen.has(value)) return out
+  seen.add(value)
   if (Array.isArray(value)) {
-    value.forEach((item, index) => undefinedPaths(item, `${path}[${index}]`, out))
+    value.forEach((item, index) => undefinedPaths(item, `${path}[${index}]`, out, seen))
     return out
   }
-  for (const key of Object.keys(value)) undefinedPaths(value[key], `${path}.${key}`, out)
+  for (const key of Object.keys(value)) undefinedPaths(value[key], `${path}.${key}`, out, seen)
   return out
+}
+
+/**
+ * Find the first path where a value differs from its JSON round trip.
+ *
+ * `JSON.parse(JSON.stringify(v))` is not `v` for `NaN` and `Infinity` (both
+ * become `null`) or for functions and symbols (dropped entirely, which also
+ * changes a key's presence). `stringify` reports none of these, so the only way
+ * to see them is to compare the two values structurally.
+ * @param original - the value before serialization.
+ * @param reparsed - the value after a JSON round trip.
+ * @param path - current path label.
+ * @param seen - pairs already compared, so a cycle terminates.
+ * @returns the first diverging path, or undefined when they match.
+ */
+function firstDivergence(original, reparsed, path = '$', seen = new WeakSet()) {
+  if (original === reparsed) return undefined
+  const type = typeof original
+  if (type === 'number') {
+    // Covers NaN -> null and Infinity -> null; Object.is keeps -0 distinct.
+    return Number.isFinite(original) && Number.isFinite(reparsed) && Object.is(original, reparsed)
+      ? undefined
+      : path
+  }
+  if (type === 'function' || type === 'symbol' || type === 'bigint' || type === 'undefined') return path
+  if (original === null || reparsed === null || typeof original !== 'object' || typeof reparsed !== 'object') {
+    return type === typeof reparsed ? undefined : path
+  }
+  if (seen.has(original)) return undefined
+  seen.add(original)
+  if (Array.isArray(original) !== Array.isArray(reparsed)) return path
+  if (Array.isArray(original)) {
+    if (original.length !== reparsed.length) return path
+    for (let index = 0; index < original.length; index += 1) {
+      const found = firstDivergence(original[index], reparsed[index], `${path}[${index}]`, seen)
+      if (found !== undefined) return found
+    }
+    return undefined
+  }
+  const keys = Object.keys(original)
+  for (const key of keys) {
+    // A dropped value removes the key entirely, so "is the key still there" has
+    // to be answered per key; comparing key counts first would report the
+    // parent instead of the field that vanished.
+    if (!(key in reparsed)) return `${path}.${key}`
+    const found = firstDivergence(original[key], reparsed[key], `${path}.${key}`, seen)
+    if (found !== undefined) return found
+  }
+  for (const key of Object.keys(reparsed)) {
+    if (!(key in original)) return `${path}.${key}`
+  }
+  return undefined
 }
 
 /**
@@ -269,29 +324,45 @@ async function loadClient(clientPath, bundleDir) {
     lastClientError = 'the bundle did not call window.__ModuleLoader__.load'
     return undefined
   }
-  const plugin = registration.factory(specifier => modules[specifier])
+  // The factory and the plugin's own apply both run against a stub that models
+  // only what this script can supply. A real bundle reaches for a shell package
+  // the stub does not resolve, so a throw here is "the harness could not mount
+  // it", not "the plugin is broken" — it becomes a skip (exit 3) rather than a
+  // crash that reads as a failed verdict.
+  let plugin
+  try {
+    plugin = registration.factory(specifier => modules[specifier])
+  } catch (error) {
+    lastClientError = `the bundle factory threw while resolving its imports (${error instanceof Error ? error.message : String(error)})`
+    return undefined
+  }
   if (plugin === undefined || typeof plugin.apply !== 'function') {
     lastClientError = 'the bundle factory did not return a Cordis browser plugin'
     return undefined
   }
   const captured = {}
-  plugin.apply({
-    effect: fn => fn(),
-    locale: {
-      register: () => () => {},
-      bind: () => key => key,
-    },
-    slots: {
-      inject: (_name, install) => install(),
-      register: (definition, component) => {
-        captured.definition = definition
-        captured.component = component
-        return () => {}
+  try {
+    plugin.apply({
+      effect: fn => fn(),
+      locale: {
+        register: () => () => {},
+        bind: () => key => key,
       },
-    },
-    remote: { $mount: () => Promise.resolve(() => {}), get harnessMarks() { return undefined } },
-    get: () => undefined,
-  })
+      slots: {
+        inject: (_name, install) => install(),
+        register: (definition, component) => {
+          captured.definition = definition
+          captured.component = component
+          return () => {}
+        },
+      },
+      remote: { $mount: () => Promise.resolve(() => {}), get harnessMarks() { return undefined } },
+      get: () => undefined,
+    })
+  } catch (error) {
+    lastClientError = `the browser half threw while mounting against the stub (${error instanceof Error ? error.message : String(error)})`
+    return undefined
+  }
   if (captured.component === undefined) {
     lastClientError = 'the bundle mounted but registered no view component'
     return undefined
@@ -332,7 +403,10 @@ async function main(argv) {
   if (client === undefined) skip(state, `the browser half could not be mounted; render is unverified (${lastClientError ?? 'unknown reason'})`)
   else pass(`the browser half mounts and registers on ${client.definition?.name ?? 'a slot'}`)
 
-  // A helper owns the three stages: it knows its own input and output shape.
+  // A helper owns the stages it knows how to run: it understands its own input
+  // and output shape. What it does NOT get is a free pass — `render` is optional
+  // in the helper contract, but the sentence printed on success claims all three
+  // stages ran, so a helper that never renders must produce exit 3, not exit 0.
   if (options.helper !== undefined) {
     const helperPath = resolve(bundleDir, options.helper)
     if (!existsSync(helperPath)) throw new Error(`helper does not exist: ${helperPath}`)
@@ -343,9 +417,6 @@ async function main(argv) {
     if (targeted.length === 0) {
       skip(state, 'no fixtures given; the helper had nothing to run over')
     }
-    // The helper returns `render` when it can render the view itself; a helper
-    // that returns one but never gets asked would leave the third stage
-    // reported as done while it never ran.
     let reviewed = 0
     let rendered = 0
     let renderable = 0
@@ -357,11 +428,26 @@ async function main(argv) {
         fail(state, `${input}: review threw (${error instanceof Error ? error.message : String(error)})`)
         continue
       }
-      if (outcome?.stateBytes !== undefined && outcome.stateBytes > options.maxState) {
+      // A review that returns nothing verified nothing; counting it would let a
+      // stub helper turn the whole run green.
+      if (outcome === undefined || outcome === null) {
+        skip(state, `${input}: the helper returned no outcome`)
+        continue
+      }
+      if (outcome.stateBytes !== undefined && outcome.stateBytes > options.maxState) {
         fail(state, `${input}: state is ${outcome.stateBytes} bytes, over the ${options.maxState} budget`)
       }
+      // The helper may hand back the wire payload so the transport rule still
+      // applies; without it the transport stage simply did not run.
+      if (outcome.view !== undefined) {
+        const drift = firstDivergence(outcome.view, JSON.parse(JSON.stringify(outcome.view)))
+        if (drift !== undefined) fail(state, `${input}: view changes through JSON at ${drift}`)
+      }
       reviewed += 1
-      if (typeof outcome?.render !== 'function') continue
+      if (typeof outcome.render !== 'function') {
+        skip(state, `${input}: the helper returned no renderer; the view was not rendered`)
+        continue
+      }
       renderable += 1
       try {
         const markup = await outcome.render()
@@ -408,6 +494,12 @@ async function main(argv) {
   const sizes = []
   let checked = 0
   let rendered = 0
+  let foldedEvents = 0
+  // `wire` is optional in the contract ("omit for host-only units"), so a bundle
+  // without one has no third stage and no second stage either. Say so instead of
+  // failing a correct bundle on a TypeError.
+  const hostOnly = definition.wire === undefined
+  if (hostOnly) skip(state, `"${definition.key}" is host-only (no wire view); transport and render have nothing to verify`)
   for (const input of targeted) {
     let state_ = definition.init({ id: 'gate-probe', createdAt: 0 })
     let events
@@ -417,40 +509,66 @@ async function main(argv) {
       fail(state, `${input}: cannot read input (${error instanceof Error ? error.message : String(error)})`)
       continue
     }
+    // A fixture that yields no events folds nothing, so every later stage
+    // passes on the untouched `init` state. Counting it as verified is how a
+    // gate goes green over input it never read.
+    if (events.length === 0) {
+      skip(state, `${input}: no events to fold; this input verifies nothing`)
+      continue
+    }
     // 1. Fold.
+    let stateBytes
     try {
       for (const event of events) state_ = definition.apply(state_, event)
       definition.stateSchema?.parse(state_)
+      // Measuring can throw on a cycle or a bigint and is part of the fold's
+      // contract, so it stays inside this guard rather than aborting the run.
+      stateBytes = JSON.stringify(JSON.parse(JSON.stringify(state_))).length
     } catch (error) {
       fail(state, `${input}: fold threw (${error instanceof Error ? error.message : String(error)})`)
       continue
     }
-    // 2. Transport.
+    foldedEvents += events.length
+    // 2. Transport. A host-only unit has nothing to send.
     let view
-    try {
-      view = definition.wire.view(state_)
-      definition.wire.viewSchema?.parse(view)
-    } catch (error) {
-      fail(state, `${input}: wire.view threw (${error instanceof Error ? error.message : String(error)})`)
-      continue
+    if (!hostOnly) {
+      try {
+        view = definition.wire.view(state_)
+        definition.wire.viewSchema?.parse(view)
+      } catch (error) {
+        fail(state, `${input}: wire.view threw (${error instanceof Error ? error.message : String(error)})`)
+        continue
+      }
+      const undefinedKeys = undefinedPaths(view)
+      if (undefinedKeys.length > 0) {
+        fail(state, `${input}: view carries undefined at ${undefinedKeys.slice(0, 3).join(', ')}`)
+      }
     }
-    const undefinedKeys = undefinedPaths(view)
-    if (undefinedKeys.length > 0) {
-      fail(state, `${input}: view carries undefined at ${undefinedKeys.slice(0, 3).join(', ')}`)
+    if (!hostOnly) {
+      // `JSON.stringify(JSON.parse(serialized)) === serialized` is a tautology
+      // for any stable key order, so comparing the text proves nothing. Compare
+      // the values instead: that catches `NaN`/`Infinity` turning into `null`
+      // and functions or symbols being dropped, neither of which `stringify`
+      // reports. The undefined scan above stays, because a dropped `undefined`
+      // leaves no trace in either form.
+      const serialized = JSON.stringify(view)
+      if (serialized === undefined) {
+        fail(state, `${input}: view is not serializable`)
+      } else {
+        const reparsed = JSON.parse(serialized)
+        const drift = firstDivergence(view, reparsed)
+        if (drift !== undefined) {
+          fail(state, `${input}: view changes through JSON at ${drift}`)
+        }
+      }
     }
-    const serialized = JSON.stringify(view)
-    if (serialized === undefined) fail(state, `${input}: view is not serializable`)
-    else if (JSON.stringify(JSON.parse(serialized)) !== serialized) {
-      fail(state, `${input}: view does not survive a JSON round trip`)
-    }
-    const stateBytes = JSON.stringify(JSON.parse(JSON.stringify(state_))).length
     sizes.push(stateBytes)
     if (stateBytes > options.maxState) {
       fail(state, `${input}: state is ${stateBytes} bytes, over the ${options.maxState} budget`)
     }
     checked += 1
     // 3. Render.
-    if (client === undefined) continue
+    if (client === undefined || hostOnly) continue
     try {
       const markup = client.render(view)
       if (typeof markup !== 'string' || markup === '') fail(state, `${input}: render produced no markup`)
@@ -460,7 +578,7 @@ async function main(argv) {
     }
   }
 
-  pass(`folded ${checked} input(s)`)
+  if (foldedEvents > 0) pass(`folded ${checked} input(s), ${foldedEvents} event(s)`)
   // `checked` counts folds, so it says nothing about render. A run where every
   // render failed would still exit 0 on the strength of the folds alone; the
   // render stage only counts as verified when it ran for every folded payload.
@@ -481,15 +599,19 @@ async function main(argv) {
 /**
  * List input files under a directory, newest last.
  *
- * A symlink pointing back up the tree would otherwise recurse forever, so
- * directories are visited once and a link is followed only while it stays
- * inside the root that was asked for.
- * @param directory - directory to scan.
- * @returns absolute paths.
+ * A symlink pointing back up the tree would otherwise recurse forever, and one
+ * pointing outside the root would silently widen the gate to an unrelated tree,
+ * so a visited set breaks cycles and a resolved path outside the root is
+ * skipped. `--limit` is documented as "newest N", so the result is ordered by
+ * modification time rather than by path.
+ * @param directory - a directory to scan, or a single file to use as-is.
+ * @returns absolute paths, oldest first.
  */
 function listInputs(directory) {
   const root = resolve(directory)
   if (!existsSync(root)) return []
+  if (!statSync(root).isDirectory()) return [root]
+  const realRoot = realpathSync(root)
   const visited = new Set()
   const walk = current => {
     let real
@@ -500,16 +622,50 @@ function listInputs(directory) {
     }
     if (visited.has(real)) return []
     visited.add(real)
+    let names
+    try {
+      names = readdirSync(current)
+    } catch {
+      // An unreadable directory is one skipped input, not a crash for the run.
+      return []
+    }
     const found = []
-    for (const name of readdirSync(current)) {
+    for (const name of names) {
       const path = join(current, name)
-      const entry = statSync(path)
-      if (entry.isDirectory()) found.push(...walk(path))
-      else found.push(path)
+      let entry
+      try {
+        entry = statSync(path)
+      } catch {
+        continue
+      }
+      if (entry.isDirectory()) {
+        // Only descend while the resolved target is still under the root.
+        let inside
+        try {
+          inside = realpathSync(path)
+        } catch {
+          continue
+        }
+        if (!inside.startsWith(realRoot)) continue
+        found.push(...walk(path))
+      } else {
+        found.push(path)
+      }
     }
     return found
   }
-  return walk(root).sort()
+  const mtimeOf = path => {
+    try {
+      return statSync(path).mtimeMs
+    } catch {
+      return 0
+    }
+  }
+  return walk(root).sort((left, right) => {
+    const delta = mtimeOf(left) - mtimeOf(right)
+    // mtime ties are possible (a copied fixture set); keep the order stable.
+    return delta !== 0 ? delta : left.localeCompare(right)
+  })
 }
 
 /**
