@@ -37,6 +37,8 @@ function fixture(): { root: string; source: string; project: string } {
   return { root, source, project }
 }
 
+// Reading and parsing the repository's own workspace and lockfile grows with their size, and a full parallel run
+// competes for the CPU: this case observed at 4.8 s, which leaves almost nothing of the 5 s default.
 it('classifies the current workspace and shares only runtime patch bytes', () => {
   const { project } = fixture()
   const repository = resolve(import.meta.dirname, '../../..')
@@ -48,7 +50,7 @@ it('classifies the current workspace and shares only runtime patch bytes', () =>
   expect(settings.overrides['@earendil-works/pi-ai']).toBeUndefined()
   expect(settings.overrides['@earendil-works/pi-ai@^1.1.0']).toBe('1.1.0')
   expect(readFileSync(join(repository, 'pnpm-lock.yaml'))).toEqual(before)
-})
+}, 30_000)
 
 it('does not infer version overrides from selected patches', () => {
   const { source, project } = fixture()
