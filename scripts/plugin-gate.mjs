@@ -159,10 +159,14 @@ function undefinedPaths(value, path = '$', out = []) {
  *
  * The plugin is not started: this captures whatever it registers, which is how
  * the product itself discovers the unit.
+ *
+ * `apply` may be `async` — Cordis accepts both — and a registration made after
+ * an `await` is not visible to a synchronous probe. The returned promise is
+ * therefore awaited before this function decides the bundle registers nothing.
  * @param plugin - the host module.
  * @returns the definition, or undefined when the bundle registers none.
  */
-function discoverProjection(plugin) {
+async function discoverProjection(plugin) {
   let definition
   const noop = () => () => {}
   const stub = new Proxy({}, {
@@ -180,7 +184,7 @@ function discoverProjection(plugin) {
     has: () => true,
   })
   try {
-    plugin.apply(stub, undefined)
+    await plugin.apply(stub, undefined)
   } catch (error) {
     // A plugin that throws while mounting under a stub is still discoverable
     // when it registered before throwing; the caller decides.
@@ -344,6 +348,7 @@ async function main(argv) {
     // reported as done while it never ran.
     let reviewed = 0
     let rendered = 0
+    let renderable = 0
     for (const input of targeted) {
       let outcome
       try {
@@ -357,6 +362,7 @@ async function main(argv) {
       }
       reviewed += 1
       if (typeof outcome?.render !== 'function') continue
+      renderable += 1
       try {
         const markup = await outcome.render()
         if (typeof markup !== 'string' || markup === '') fail(state, `${input}: render produced no markup`)
@@ -367,13 +373,17 @@ async function main(argv) {
     }
     if (reviewed > 0) pass(`the helper reviewed ${reviewed} input(s)`)
     if (rendered > 0) pass(`the helper rendered ${rendered} payload(s)`)
+    // A helper that offers render for some inputs must render all of them.
+    if (renderable > 0 && rendered < renderable) {
+      fail(state, `render verified ${rendered} of ${renderable} payload(s)`)
+    }
     return finish(state, options, reviewed)
   }
 
   // No helper: use the projection the bundle registers.
   let definition
   try {
-    definition = discoverProjection(plugin)
+    definition = await discoverProjection(plugin)
   } catch (error) {
     fail(state, error instanceof Error ? error.message : String(error))
     return finish(state, options, 0)
@@ -451,7 +461,15 @@ async function main(argv) {
   }
 
   pass(`folded ${checked} input(s)`)
-  if (client !== undefined) pass(`rendered ${rendered} payload(s)`)
+  // `checked` counts folds, so it says nothing about render. A run where every
+  // render failed would still exit 0 on the strength of the folds alone; the
+  // render stage only counts as verified when it ran for every folded payload.
+  if (client !== undefined) {
+    if (rendered > 0) pass(`rendered ${rendered} payload(s)`)
+    if (rendered < checked) {
+      fail(state, `render verified ${rendered} of ${checked} payload(s)`)
+    }
+  }
   if (sizes.length > 0) {
     sizes.sort((left, right) => left - right)
     const kb = value => `${(value / 1024).toFixed(1)} KB`
