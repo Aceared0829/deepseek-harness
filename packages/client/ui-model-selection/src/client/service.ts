@@ -17,6 +17,7 @@ import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionBinding } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { TypertClientRemote } from '@deepseek-ai/dsh-typert-protocol'
 import { WeakMapWithValues } from '@deepseek-ai/dsh-util-values'
 import { ModelCatalogDirectory } from './catalog.ts'
 import { ModelDirectory } from './directory.ts'
@@ -39,12 +40,15 @@ export class ModelDirectoryResolver extends Service {
 
   private readonly live: LiveState = { directories: new WeakMapWithValues() }
   private readonly catalog: ModelCatalogDirectory
+  /** Session wire face captured from this service's own context. */
+  private readonly remoteSession: Pick<TypertClientRemote['session'], 'selectModel'>
 
   /**
    * @param ctx - owning root context (the service registers itself as `models`).
    */
   constructor(ctx: Context) {
     super(ctx, 'modelDirectories')
+    this.remoteSession = ctx.remote.session
     this.catalog = new ModelCatalogDirectory(ctx)
     void this.catalog.load().catch(() => { /* selectors expose the shared error */ })
     ctx.on('connection/reset', () => {
@@ -59,15 +63,15 @@ export class ModelDirectoryResolver extends Service {
 
   /**
    * Resolve the per-session shared directory (lazy; the scope disposer
-   * removes and disposes it). Unknown sessions fail loud.
+   * removes and disposes it). Unknown sessions fail loud. The session wire
+   * face is captured when this service starts, so a caller does not need to
+   * inject `remote.session`.
    * @param sessionId - the owning session.
    * @returns the resident directory both entries share.
    */
   directoryFor(sessionId: SessionId): ModelDirectory {
     const { live } = this
     const sessions = this.ctx.sessions
-    const remoteSession = this.ctx.get('remote.session')
-    if (remoteSession === undefined) throw new Error('ui-model-selection: remote.session service unavailable')
     const actx = sessions.scope(sessionId)
     if (actx === undefined) throw new Error(`ui-model-selection: session "${String(sessionId)}" resolved no scope`)
     const binding = sessions.binding(sessionId)
@@ -75,7 +79,7 @@ export class ModelDirectoryResolver extends Service {
     const existing = live.directories.get(binding)
     if (existing !== undefined) return existing
     const directory = new ModelDirectory(
-      remoteSession,
+      this.remoteSession,
       sessionId,
       () => sessions.subagentAddress(sessionId) === undefined,
       this.catalog,

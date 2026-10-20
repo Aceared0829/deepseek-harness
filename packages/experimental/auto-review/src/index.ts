@@ -621,20 +621,8 @@ async function classifyRisk(
   const cwd = await ctx.workingDirectory.ensure(agent, signal)
   const snapshot = snapshotAutoReview(agent, exec, cwd)
   // This review prompt is sent only through ctx.llm.stream and never enters a Session log.
-  //
-  // `temperature` is deliberately NOT set. It was `0` here, and this was the only
-  // call site in the whole repository that passed one. On this deployment every
-  // review routed to a provider that rejects the field outright: the upstream
-  // answered `11133 request parameters were rejected`, the pool tried its other
-  // accounts with the same result, and the tool body was then refused —
-  // 42 times across 9 sessions, including small sessions, so the payload size was
-  // never the cause. A review that cannot run blocks the action it was meant to
-  // police, which is worse than reviewing it at the provider's default temperature:
-  // the decision is a discrete classification, and determinism at `0` buys little
-  // that the fixed policy text does not already provide.
-  //
-  // If a future provider genuinely needs a pinned temperature, gate it on the
-  // catalog's `supportsTemperature` rather than reintroducing a blanket field.
+  // Do not send temperature. A provider that rejects the field fails the review,
+  // and that failure denies the tool body.
   const options: GenerateOptions = deepFreeze({
     provider: snapshot.provider,
     model: snapshot.model,

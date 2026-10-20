@@ -154,6 +154,6 @@ Rule: after changing profile plugins, launch the real Desktop profile and inspec
 
 Symptom: the model selector failed with `cannot get property "remote.session" without inject` even though `ModelDirectoryResolver` declared `remote.session` in its own static inject list. A dependent plugin that injected only `modelDirectories` triggered the failure by calling `directoryFor()`.
 
-Course: Cordis tracks service method calls under the caller context. Inside `directoryFor()`, `this.ctx.sessions` returned the original owner's service, but reading `this.ctx.remote.session` enforced the caller's inject list, which omitted `remote.session`, so the proxy threw before returning the dependency.
+Cause: Cordis tracks service method calls under the caller context. Inside `directoryFor()`, `this.ctx.sessions` returned the original owner's service, but reading `this.ctx.remote.session` enforced the caller's inject list, which omitted `remote.session`, so the proxy threw before returning the dependency.
 
-Rule: a service method that may run under a narrower caller context must resolve dependencies it passes onward with `ctx.get(name)` and report absence explicitly. Do not assume the service's own static inject list authorizes property-proxy reads through `this.ctx` during a caller-tracked method. Exercise the consumer with the minimum inject needed to reach the service, not only through the service's own plugin.
+Rule: capture a dependency while the providing context is current, or read it with `ctx.get(name)`. Do not assume the service's own static inject list authorizes a `this.ctx` property-proxy read during a caller-tracked method. Exercise the consumer with the minimum inject needed to reach the service, not only through the service's own plugin.
