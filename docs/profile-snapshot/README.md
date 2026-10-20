@@ -1,28 +1,30 @@
-# DSH Profile 插件快照
+# DSH Profile Plugin Snapshot
 
-把当前设备的 DSH profile（插件清单 + 版本锁定 + 依赖解析策略）同步到另一台设备。
+English | [中文](README.zh.md)
 
-## 内容
+Carry a DSH profile from one device to another: plugin roster, locked versions, and dependency-resolution policy.
 
-| 文件 | 说明 |
+## Contents
+
+| File | Purpose |
 | --- | --- |
-| `package.json` | 插件清单与版本约束。`dsh.profile.bundles` 是启用顺序，`dependencies` 是版本来源。 |
-| `pnpm-lock.yaml` | 锁文件。还原时用它保证装出**完全相同**的版本。 |
-| `pnpm-workspace.yaml` | pnpm 解析策略（`hoisted`）、允许构建的包、`minimumReleaseAgeExclude`。 |
-| `restore.ps1` | 一键还原脚本。 |
+| `package.json` | Plugin roster and version constraints. `dsh.profile.bundles` is the activation order; `dependencies` is where versions come from. |
+| `pnpm-lock.yaml` | Lockfile. Restoration uses it to install **exactly** the same versions. |
+| `pnpm-workspace.yaml` | pnpm resolution policy (`hoisted`), packages allowed to run builds, `minimumReleaseAgeExclude`. |
+| `restore.ps1` | One-command restore script. |
 
-## 关于两个本地私有包
+## About the two local private packages
 
-`package.json` 里有两个 `link:` 依赖，它们**不是 npm 上的包**，新设备上没有这两个目录，直接安装会失败：
+`package.json` links two `link:` dependencies that are **not published packages**, so a new device has no such directories and a plain install fails:
 
-- `@local/dsh-desktop-extras` → `<workspace>/bundles/desktop-extras`
-- `@dsh-pet/bridge` → `<workspace>/pet-src/integrations/dsh-pet-bridge`
+- `@local/dsh-desktop-extras` pointing at `<workspace>/bundles/desktop-extras`
+- `@dsh-pet/bridge` pointing at `<workspace>/pet-src/integrations/dsh-pet-bridge`
 
-`restore.ps1` 会自动检测：目录存在就正常 link，不存在就提示你，并给出两个选项（跳过 / 手动放入）。**这不是快照本身的问题，是这两个包本来就只存在于本机。**
+`restore.ps1` detects this: it links the directory when it exists, and otherwise tells you and offers two choices (skip, or place the package yourself). **This is not a defect in the snapshot; the two packages only ever existed on the original machine.**
 
-## 还原步骤
+## Restoring
 
-在新设备上，先确保 DSH 仓库已 clone 并能正常启动，然后：
+On the new device, first make sure the DSH repository is cloned and starts normally, then:
 
 ```powershell
 # 1. 备份当前 profile（可选但强烈建议）
@@ -32,36 +34,36 @@ $profile = "$env:DSH_PROFILE_DIR"
 .\restore.ps1 -ProfileDir $profile
 ```
 
-脚本会：
-1. 备份现有 `package.json` / `pnpm-lock.yaml` / `pnpm-workspace.yaml` 到 `.bak-<时间戳>`
-2. 复制快照文件进去
-3. 把 `link:` 路径改写成新设备上的实际路径（或跳过）
-4. 执行 `pnpm install`，失败时回滚配置
+The script:
 
-### 参数
+1. backs up the existing `package.json`, `pnpm-lock.yaml`, and `pnpm-workspace.yaml` to `.bak-<timestamp>`
+2. copies the snapshot files in
+3. rewrites the `link:` paths to the real paths on this device, or skips them
+4. runs `pnpm install`, rolling the configuration back if it fails
 
-| 参数 | 说明 |
+### Parameters
+
+| Parameter | Purpose |
 | --- | --- |
-| `-ProfileDir <path>` | 目标 profile 目录，默认取 `$env:DSH_PROFILE_DIR` |
-| `-WorkspaceDir <path>` | 私有包所在 workspace 根目录。不指定时自动向上查找 `default-workspace`，再兜底 `~/Documents/deepseek-harness/default-workspace` |
-| `-SkipLocalPackages` | 强制跳过两个本地私有包 |
-| `-ForceUnfrozen` | 不使用 `--frozen-lockfile` |
+| `-ProfileDir <path>` | Target profile directory; defaults to `$env:DSH_PROFILE_DIR` |
+| `-WorkspaceDir <path>` | Workspace root holding the private packages. When omitted, the script searches upwards for `default-workspace` and then falls back to `~/Documents/deepseek-harness/default-workspace` |
+| `-SkipLocalPackages` | Force both local private packages to be skipped |
+| `-ForceUnfrozen` | Do not pass `--frozen-lockfile` |
 
-### 退出码
+### Exit codes
 
-| 码 | 含义 |
+| Code | Meaning |
 | --- | --- |
-| `0` | 完全成功 |
-| `1` | 安装失败，配置已回滚（`node_modules` 可能残留，需手动清理） |
-| `2` | 配置已就位，但本机没有 `pnpm`，需手动执行 `pnpm install` |
+| `0` | Complete success |
+| `1` | Install failed and the configuration was rolled back (`node_modules` may need manual cleanup) |
+| `2` | The configuration is in place, but this machine has no `pnpm`; run `pnpm install` yourself |
 
-### 关于 `--frozen-lockfile`
+### About `--frozen-lockfile`
 
-清单被改写时（跳过了私有包），`package.json` 与 lock 必然不一致，`--frozen-lockfile` 会直接失败。
-脚本会自动检测这种情况并退化为普通安装，不需要你手动处理。
+When the roster was rewritten because private packages were skipped, `package.json` and the lockfile necessarily disagree, so `--frozen-lockfile` fails outright. The script detects that case and falls back to a plain install; you do not handle it by hand.
 
-## 注意
+## Notes
 
-- **`cordis.patch.yml` 不在此快照内** —— 那是你的私人运行时配置（模型清单、`baseURL`、主题、pet 位置）。需要的话单独拷贝。
-- 还原后重启 DSH 使插件生效。
-- 脚本只读取快照目录里的文件，**不会修改快照本身**，可以安全重复运行。
+- **`cordis.patch.yml` is not part of this snapshot.** It is your private runtime configuration (model list, `baseURL`, theme, pet position). Copy it separately if you need it.
+- Restart DSH after restoring so the plugins take effect.
+- The script only reads files inside the snapshot directory and **never modifies the snapshot itself**, so it is safe to run repeatedly.

@@ -1,0 +1,28 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/profile-snapshot/README.md
+/dsh-profile-plugin-snapshot:
+  en: e92a335d468856bf
+  zh: 45603e2fa46a827e
+/dsh-profile-plugin-snapshot/contents:
+  en: 7d0920f14a9c4f05
+  zh: 879c254aee406e96
+/dsh-profile-plugin-snapshot/about-the-two-local-private-packages:
+  en: 1b744e0bdf4fea06
+  zh: ab43937e755eb06f
+/dsh-profile-plugin-snapshot/restoring:
+  en: 695b80cf14fa9dbc
+  zh: 84536f058b836fcc
+/dsh-profile-plugin-snapshot/restoring/parameters:
+  en: 445b4ec3c0a49335
+  zh: d6331f3540919243
+/dsh-profile-plugin-snapshot/restoring/exit-codes:
+  en: 4a05240f77fad212
+  zh: b667ecce9fa6f876
+/dsh-profile-plugin-snapshot/restoring/about-frozen-lockfile:
+  en: 79c1c4875a91fcfa
+  zh: ce409fd3f6c912a5
+/dsh-profile-plugin-snapshot/notes:
+  en: eb81ca0b76e811d8
+  zh: 44390760030e1d86

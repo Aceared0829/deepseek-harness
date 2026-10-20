@@ -43,6 +43,15 @@ function metadata(home: string, id: string): Record<string, unknown> {
   return JSON.parse(readFileSync(join(home, 'profile-backups', id, 'meta.json'), 'utf8')) as Record<string, unknown>
 }
 
+/** Read one file's metadata record, failing the test when the snapshot did not record it. */
+function fileRecord(home: string, id: string, name: string): { bytes: number; sha256: string } {
+  const files = metadata(home, id).files
+  if (typeof files !== 'object' || files === null || !(name in files)) {
+    throw new Error(`snapshot ${id} recorded no file ${name}`)
+  }
+  return (files as Record<string, { bytes: number; sha256: string }>)[name] as { bytes: number; sha256: string }
+}
+
 describe('profile snapshot', () => {
   it('creates a snapshot and lists its label and files', () => {
     const f = fixture()
@@ -50,15 +59,13 @@ describe('profile snapshot', () => {
     expect(created).toContain('snapshot desktop-')
 
     const id = snapshotId(f.home)
-    expect(metadata(f.home, id)).toMatchObject({
-      id,
-      profile: 'desktop',
-      label: 'before promotion',
-      files: {
-        'package.json': expect.objectContaining({ bytes: expect.any(Number), sha256: expect.stringMatching(/^[\da-f]{16}$/u) }),
-        'cordis.patch.yml': expect.objectContaining({ bytes: expect.any(Number), sha256: expect.stringMatching(/^[\da-f]{16}$/u) }),
-      },
-    })
+    expect(metadata(f.home, id)).toMatchObject({ id, profile: 'desktop', label: 'before promotion' })
+    // Each recorded file carries a byte count and a 16-character digest of its contents.
+    for (const name of ['package.json', 'cordis.patch.yml']) {
+      const record = fileRecord(f.home, id, name)
+      expect(record.bytes).toBeGreaterThan(0)
+      expect(record.sha256).toMatch(/^[\da-f]{16}$/u)
+    }
     expect(invoke(['list', '--home', f.home])).toContain('before promotion  package.json, cordis.patch.yml')
   })
 
