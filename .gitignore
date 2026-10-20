@@ -49,3 +49,15 @@ worktrees/
 native/system/test/bin/
 # Locally authored plugin working copies; published bundles live in their own repositories.
 /plugins/
+
+# Locally generated session/agent scratch data, never part of the source tree.
+.dsh-graph/
+.dsh-acl-recovery/
+.handoff-*/
+harness-evidence-export*.jsonl
+
+# Stray transpiler output beside TypeScript sources: tsc writes to lib/, so a
+# .js next to a .ts in src/ is an accident (a loader resolving .ts by default
+# emits one). No such file is tracked.
+/vendor/*/src/**/*.js
+/packages/*/*/src/**/*.js
