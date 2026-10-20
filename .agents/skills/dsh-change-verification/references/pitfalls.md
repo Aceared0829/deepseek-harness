@@ -149,3 +149,11 @@ Symptom: the desktop profile booted, but every `settings/describe` returned `ok:
 Cause: `dsh-mimir@0.21.1` generated its Typert host manifest with `codec.schema`, while the current loader requires a strict codec with a `create()` projection factory. The loader rejects the whole contributor, and the dependent settings surface fails even though the plugin's module imports.
 
 Rule: after changing profile plugins, launch the real Desktop profile and inspect Host stderr, not only whether the window opens. Treat a failed `typert-loader` contributor as a composition failure; disable or upgrade the offending plugin before diagnosing unrelated settings or approval UI.
+
+## 2026-10-20 - Service method read an injected dependency through the caller context
+
+Symptom: the model selector failed with `cannot get property "remote.session" without inject` even though `ModelDirectoryResolver` declared `remote.session` in its own static inject list. A dependent plugin that injected only `modelDirectories` triggered the failure by calling `directoryFor()`.
+
+Course: Cordis tracks service method calls under the caller context. Inside `directoryFor()`, `this.ctx.sessions` returned the original owner's service, but reading `this.ctx.remote.session` enforced the caller's inject list, which omitted `remote.session`, so the proxy threw before returning the dependency.
+
+Rule: a service method that may run under a narrower caller context must resolve dependencies it passes onward with `ctx.get(name)` and report absence explicitly. Do not assume the service's own static inject list authorizes property-proxy reads through `this.ctx` during a caller-tracked method. Exercise the consumer with the minimum inject needed to reach the service, not only through the service's own plugin.

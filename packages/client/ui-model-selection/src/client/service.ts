@@ -66,6 +66,8 @@ export class ModelDirectoryResolver extends Service {
   directoryFor(sessionId: SessionId): ModelDirectory {
     const { live } = this
     const sessions = this.ctx.sessions
+    const remoteSession = this.ctx.get('remote.session')
+    if (remoteSession === undefined) throw new Error('ui-model-selection: remote.session service unavailable')
     const actx = sessions.scope(sessionId)
     if (actx === undefined) throw new Error(`ui-model-selection: session "${String(sessionId)}" resolved no scope`)
     const binding = sessions.binding(sessionId)
@@ -73,7 +75,7 @@ export class ModelDirectoryResolver extends Service {
     const existing = live.directories.get(binding)
     if (existing !== undefined) return existing
     const directory = new ModelDirectory(
-      this.ctx.remote.session,
+      remoteSession,
       sessionId,
       () => sessions.subagentAddress(sessionId) === undefined,
       this.catalog,

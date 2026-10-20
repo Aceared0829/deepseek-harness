@@ -225,6 +225,18 @@ describe('ui-model-selection dual entry', () => {
     expect(b.seat().locale).toBe('model')
   })
 
+  it('resolves a model directory from a dependent plugin without injecting remote.session', async () => {
+    const b = await bench()
+    b.mint('owned')
+    const fiber = b.ctx.plugin({
+      inject: ['modelDirectories'],
+      apply(scope) {
+        scope.modelDirectories.directoryFor(sid('owned'))
+      },
+    })
+    await expect(fiber.await()).resolves.toBeDefined()
+  })
+
   it.each(['zh', 'en'] as const)('shows names and providers without catalog descriptions (%s)', async (locale) => {
     const b = await bench(locale)
     b.mint('s1')
