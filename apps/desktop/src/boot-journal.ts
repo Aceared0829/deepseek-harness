@@ -156,10 +156,14 @@ export class DesktopBootJournal {
     }
   }
 
-  /** Mark this composition as having used its rollback, so recovery itself cannot loop. */
-  recordRollback(): void {
+  /**
+   * Mark a composition as having used its rollback, so recovery itself cannot loop. The caller passes the fingerprint
+   * it decided on: by the time a rollback has been applied the profile files describe the recovered composition, so
+   * reading them here would latch the wrong one.
+   * @param fingerprint Composition fingerprint captured before the profile was rewritten.
+   */
+  recordRollback(fingerprint: string): void {
     try {
-      const fingerprint = profileFingerprint(this.profileDir)
       const previous = this.read()
       const same = previous !== undefined && previous.fingerprint === fingerprint
       const now = new Date().toISOString()

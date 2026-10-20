@@ -2649,6 +2649,39 @@ describe('desktop main startup', () => {
     expect((report.error as Error).message).toContain('No event-loop delay measurement was available')
   })
 
+  it('does not quote a replaced Host\'s measurement in a later stall report', async () => {
+    vi.stubEnv('DSH_DESKTOP_HOST_LIVENESS_INTERVAL_MS', '1000')
+    vi.stubEnv('DSH_DESKTOP_HOST_STALL_PROBES', '1')
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const first = harness.hosts[0]!
+    first.ready.resolve()
+    await harness.navigated.promise
+    // The first Host measures a block, then stalls and is replaced.
+    first.probe.mockResolvedValueOnce({ observedMs: 30_000, samples: 30_000, p50Ms: 1, p99Ms: 240, maxMs: 4800 })
+    await vi.advanceTimersByTimeAsync(1000)
+    first.probe.mockResolvedValue(undefined)
+    const restarted = harness.nextHostStart()
+    const navigation = harness.nextNavigation()
+    await vi.advanceTimersByTimeAsync(1000)
+    await first.stopping.promise
+    first.exited.resolve()
+    await restarted
+    harness.hosts[1]!.ready.resolve()
+    await navigation
+    vi.mocked(writeCrashReport).mockClear()
+    // The replacement never reports a measurement, so its own stall must not borrow the previous Host's.
+    harness.hosts[1]!.probe.mockResolvedValue(undefined)
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => { expect(writeCrashReport).toHaveBeenCalledOnce() })
+    const [, report] = vi.mocked(writeCrashReport).mock.calls[0]!
+    const message = (report.error as Error).message
+    expect(message).toContain('No event-loop delay measurement was available')
+    expect(message).not.toContain('4800')
+  }, 20_000)
+
   it('reports a stalled Host once and keeps the process alive', async () => {
     vi.stubEnv('DSH_DESKTOP_HOST_LIVENESS_INTERVAL_MS', '1000')
     // Detection only: this case pins the report, not the replacement.

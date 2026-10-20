@@ -72,11 +72,30 @@ describe('desktop boot journal', () => {
   it('never authorizes a second rollback for the same composition', () => {
     const boot = journal(undefined, 1)
     boot.recordFailure(new Error('did not start'))
-    expect(boot.evaluate().rollback).toBe(true)
-    boot.recordRollback()
+    const decision = boot.evaluate()
+    expect(decision.rollback).toBe(true)
+    // The latch names the composition that failed, not the one the rollback leaves behind.
+    boot.recordRollback(decision.fingerprint)
     expect(boot.evaluate().rollback).toBe(false)
     boot.recordFailure(new Error('still does not start'))
     expect(boot.evaluate()).toMatchObject({ rollback: false, failures: 2 })
+  })
+
+  it('latches the failing composition even after the profile was rewritten', () => {
+    const profileDir = profile({ 'cordis.patch.yml': 'patches:\n  - name: broken\n' })
+    const boot = journal(profileDir, 1)
+    boot.recordFailure(new Error('did not start'))
+    const failing = boot.evaluate().fingerprint
+    // A rollback replaces the patch, exactly as sanitizeProfile does.
+    writeFileSync(join(profileDir, 'cordis.patch.yml'), 'patches: []\n')
+    expect(profileFingerprint(profileDir)).not.toBe(failing)
+    boot.recordRollback(failing)
+    // The recovered composition has no history of its own, so it is not latched as already rolled back.
+    expect(boot.evaluate()).toMatchObject({ rollback: false, failures: 0 })
+    // Restoring the failing composition finds its latch consumed: it reports its own count but never rolls back
+    // a second time.
+    writeFileSync(join(profileDir, 'cordis.patch.yml'), 'patches:\n  - name: broken\n')
+    expect(boot.evaluate()).toMatchObject({ rollback: false, failures: 1 })
   })
 
   it('clears the record once a launch reaches readiness', () => {

@@ -568,7 +568,8 @@ async function main(): Promise<void> {
     stopLivenessWatch()
     if (livenessIntervalMs === 0) return
     // The delay the last answered probe reported. A stall that follows it is described by that measurement,
-    // which is the difference between a blocked loop and a slow request.
+    // which is the difference between a blocked loop and a slow request. Each watch belongs to one Host
+    // generation, so a replacement starts with no measurement rather than quoting the previous Host's.
     let lastDelay: DesktopEventLoopDelay | undefined
     const timer = setInterval(() => {
       const host = backend.host
@@ -589,6 +590,8 @@ async function main(): Promise<void> {
           ), 'host').catch((failure: unknown) => { console.error(failure) })
         }
         if (stallProbes === 0 || missedProbes < stallProbes) return
+        // The measurement belongs to the Host being replaced; a later stall must not quote this generation's numbers.
+        lastDelay = undefined
         restartStalledHost(host)
       })
     }, livenessIntervalMs)
@@ -832,7 +835,9 @@ async function main(): Promise<void> {
       console.warn('dsh desktop: the unstartable profile could not be rolled back', error)
       return undefined
     }
-    bootJournal.recordRollback()
+    // The latch must name the composition that failed, which `evaluate` already identified: `disableAllPlugins`
+    // rewrites the profile, so a fingerprint read after it would describe the recovered composition instead.
+    bootJournal.recordRollback(decision.fingerprint)
     console.warn(`dsh desktop: rolled back a profile that failed to start ${String(decision.failures)} times`, {
       profilePatchBackup: backupPath ?? null,
     })
