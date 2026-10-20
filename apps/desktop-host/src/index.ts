@@ -50,10 +50,17 @@ async function main(): Promise<void> {
   } = {}
   const bootLeases = new Map<string, () => void>()
   let nextBootLease = 1
+  /**
+   * Delay sampler, released with the Host. Held in a record because teardown is defined before the application
+   * tree exists, and the sampler can only start once it does.
+   */
+  const sampling: { current?: ReturnType<typeof startEventLoopDelaySampler> } = {}
   const send = createIpcSender(process)
   const stop = (): Promise<void> => stopping ??= (async () => {
     for (const release of bootLeases.values()) release()
     bootLeases.clear()
+    // The histogram owns a timer; releasing it keeps teardown from leaving one armed.
+    sampling.current?.stop()
     // Startup failure is reported by main; shutdown only owns a tree that booted.
     const running = await application.catch(() => undefined)
     await running?.shutdown.shutdown(0)
@@ -141,8 +148,8 @@ async function main(): Promise<void> {
   process.once('disconnect', () => { void stop() })
   const { ctx } = await application
   // Sampling starts once the tree is up: a startup that never reaches here has its own readiness deadline.
-  const eventLoopDelay = startEventLoopDelaySampler()
-  control.updateTasks = installDesktopUpdateTaskControl(ctx, eventLoopDelay)
+  sampling.current = startEventLoopDelaySampler()
+  control.updateTasks = installDesktopUpdateTaskControl(ctx, sampling.current)
   control.quitInspection = installDesktopQuitInspection(ctx)
   control.bootInjections = () => {
     const clientModules = ctx.get('clientModules')
