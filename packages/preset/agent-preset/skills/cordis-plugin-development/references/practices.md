@@ -2,6 +2,10 @@
 
 These rules follow from Harness mechanisms. Confirm every Service method, Event name, and dispatch mode named here with `cordis_inspect_query` (`Service`, `Event`) before relying on it; the installed Harness is the authority.
 
+Performance and UI rules live in `practices-runtime.md`. Read that one too before
+writing a view or anything that runs during a lifecycle hook: the two sections
+were split out of this file so each stays readable in one pass.
+
 ## Principles
 
 1. **The session log is the only source of truth.** Anything the model sees must be reconstructable from committed session events; fork, resume, and replay derive from the log. Plugin memory is a derived cache.
@@ -20,21 +24,3 @@ These rules follow from Harness mechanisms. Confirm every Service method, Event 
 - Put optional services in `inject` or `ctx.inject([...], ...)` so the plugin stays inactive in profiles without them instead of throwing.
 - Do not append session events with a new `type`. Readers accept an unknown stored event only when its envelope carries `ignorable: true`, and live `Session.append()` cannot set that marker, so the Session would refuse to reopen. `appendPluginRecord()` writes ignorable `plugin:` records, but it is reserved for DSH's experimental packages because a Session format migration keeps those records only on a best-effort basis. Derive state from existing events, or keep plugin-owned data in a storage service found through inspection.
 - Put tunable values in the plugin's `Config` so users change them in `cordis.patch.yml`; the user's patch layer survives upgrades.
-
-## Performance
-
-- Keep per-session state derived from the log in a `ctx.sessionProjections` unit instead of subscribing to `session/event` and rescanning `session.events`. `apply(state, event)` is pure and synchronous and returns the same reference for events it ignores, so unchanged state costs nothing downstream. Read with `stateOf()`. A `view()` returns the same reference when its value is unchanged, which suppresses publication.
-- Keep projection state plain JSON and bump `stateVersion` when fields or fold semantics change. The projection cache then checkpoints it, cold reads replay only the tail, and stale checkpoints are discarded.
-- Wait on durable events such as `turn/end`, `assistant/message`, or `tool/result`; render live tokens from `agent/assistant-stream`. Do not poll `agent/status`. `whenIdle()` does not mean one follow-up finished: several inputs can share one running interval.
-- A timer that starts work calls `agent.followup()`, which wakes the agent; `agent.inject()` does not wake it, so injected context can wait in the inbox until other input arrives. Clear the timer in the owning effect.
-- **Never hold the event loop through a plugin lifecycle hook.** The Host runs one Node event loop, so a synchronous long task in `apply()`, an event listener, a tool body, or a slot injector freezes every session, tool, and HTTP request in the process; nothing inside the process can rescue it. Bound the work per call and hand anything longer to an async path: stream or chunk with `await`, move it to `ctx.subprocess`/`ctx.shell`, or schedule it on a worker. An unbounded `while` loop, a synchronous read of a large file, and a blocking `spawnSync` are all the same failure.
-- The Desktop shell replaces a Host that stops answering its liveness probes, so a hidden infinite loop costs the person whatever that Host was holding. Treat a blocking loop as a defect even when the frozen window eventually recovers.
-
-## UI
-
-- Render plugin pages as React components in a slot. Do not serve an HTML page from the Host and embed it in an iframe: an iframe document does not receive the host's theme tokens, light/dark switching, or `ctx.locale`.
-- Style with the theme tokens that `cordis_inspect_query` `Theme` lists (`--dsw-alias-*`); literal colors are for artwork only. Tokens are the lowest-risk way to match the host: a renamed token degrades appearance but never breaks rendering. Copy spacing, type sizes, and row patterns from an existing host page of the same kind; the Plugin Manager page is the reference for management lists.
-- Do not `require('@deepseek-ai/dsh-client-ui-primitives')` or load any other Harness Client package as a module; `dsh.client.inject` entries only order activation and stay allowed. They change without notice, a plain-JS plugin has no type check, and a throwing component blanks your slot entry (console: `slot entry crashed in '<slot>'`). Write your own controls and match the host instead: copy markup, CSS, and behavior from the primitive into the plugin (`src/*.tsx` and `*.module.css` in a DSH source checkout, or the installed package's `lib/index.js` and `lib/**/*.css`), or inspect the rendered host control in the connected page. Rename copied classes under your plugin's prefix, keep only `--dsw-alias-*` token references, and keep the behavior that users rely on, such as Modal focus and Escape handling, `role="switch"` with `aria-checked`, and Tooltip placement. Tokens then remain the only shared styling dependency.
-- Contribute through slots: `ctx.slots.inject(ownerKey, () => ctx.slots.register(...))`. The callback's registrations are disposed when the owning declaration collapses and reinstalled when it returns. Read session data through the slot props' selector hooks, subscribing to the smallest slice. Do not write DOM outside your component or append to `document.body`.
-- Add a Chat row by registering an event definition with `ctx.uiConversation.events.register()` and its view in the `conversation.chat.node` slot under the definition's `kind`, which is the renderer key; the Conversation layer owns paging, Turn and Step placement, and incremental assembly.
-- When the Client needs a value derived from a session, declare `wire.view` on the Host projection. The value reaches the Client already computed; the Client does not fold session events itself.
