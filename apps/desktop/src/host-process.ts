@@ -26,6 +26,8 @@ type DesktopHostEvent = ReadyEvent | FatalEvent | PlatformSessionEvent | { reado
   readonly type: 'update-tasks'
   readonly requestId: number
   readonly active: boolean
+  /** Event-loop delay observed by the Host; present on `inspect` answers, absent on handoff actions. */
+  readonly eventLoopDelay?: DesktopEventLoopDelay
   readonly error?: string
 } | {
   readonly type: 'boot-injections'
@@ -48,6 +50,16 @@ type DesktopHostEvent = ReadyEvent | FatalEvent | PlatformSessionEvent | { reado
 /** Correlated answer to one shell control request. */
 type DesktopHostControlResponse = Extract<DesktopHostEvent, { readonly requestId: number }>
 
+/** Event-loop delay the Host measured, in whole milliseconds; all zeros when it recorded nothing. */
+export interface DesktopEventLoopDelay {
+  /** Observation window in milliseconds; 0 when the Host ran no sampler. */
+  readonly observedMs: number
+  readonly samples: number
+  readonly p50Ms: number
+  readonly p99Ms: number
+  readonly maxMs: number
+}
+
 /** What quitting now would affect, as reported by the Host. */
 export interface DesktopQuitInspection {
   readonly activeTasks: boolean
@@ -57,7 +69,24 @@ export interface DesktopQuitInspection {
 /** Quit inspection deadline; a slower Host counts as unknown work and the shell asks before quitting. */
 export const QUIT_INSPECTION_DEADLINE_MS = 2_000
 
+/**
+ * Upper bound on Host startup. A Host that never reports readiness is either waiting forever on a plugin the
+ * profile mounts or blocked in one: without a deadline the shell waits on `start()` for the process lifetime and
+ * the window stays in its starting state.
+ */
+export const HOST_READY_TIMEOUT_MS = 120_000
+
 const MAX_HOST_DIAGNOSTIC_CHARS = 64 * 1024
+
+/** Whether a control reply carries a delay measurement this shell can report. */
+function isEventLoopDelay(value: unknown): value is DesktopEventLoopDelay {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as Record<string, unknown>
+  return ['observedMs', 'samples', 'p50Ms', 'p99Ms', 'maxMs'].every((field) => {
+    const field_ = candidate[field]
+    return Number.isSafeInteger(field_) && (field_ as number) >= 0
+  })
+}
 
 function isDesktopHostEvent(message: unknown): message is DesktopHostEvent {
   if (typeof message !== 'object' || message === null || !('type' in message)) return false
@@ -91,6 +120,7 @@ function isDesktopHostEvent(message: unknown): message is DesktopHostEvent {
     case 'update-tasks':
       return Number.isSafeInteger(candidate.requestId) && typeof candidate.active === 'boolean'
         && (candidate.error === undefined || typeof candidate.error === 'string')
+        && (candidate.eventLoopDelay === undefined || isEventLoopDelay(candidate.eventLoopDelay))
     case 'boot-injections':
       return Number.isSafeInteger(candidate.requestId)
         && ((Array.isArray(candidate.injections) && typeof candidate.lease === 'string' && candidate.lease.length > 0
@@ -156,6 +186,12 @@ export class DesktopHostFatalError extends Error {
   get diagnostic(): string | undefined { return this.#diagnostic }
 }
 
+/**
+ * The Host did not report readiness before {@link HOST_READY_TIMEOUT_MS}. Unlike a crash or a reported fatal error,
+ * nothing inside the Host observed the failure, so this is the only record that startup stalled.
+ */
+export class DesktopHostReadyTimeoutError extends Error {}
+
 /** One Web backend running under the Electron executable in Node mode. */
 export class DesktopHostProcess {
   private child: ChildProcess | undefined
@@ -166,6 +202,8 @@ export class DesktopHostProcess {
     this.readyReject = reject
   })
   private exitPromise: Promise<void> | undefined
+  /** Startup deadline; cleared once readiness arrives or the attempt fails. */
+  private readyDeadline: ReturnType<typeof setTimeout> | undefined
   private stderr = ''
   private failureReported = false
   private stopping = false
@@ -187,6 +225,7 @@ export class DesktopHostProcess {
    *   `office-skills` resources fail Host startup.
    * @param packageManager - Bundled pnpm entry and Node launcher directory, scoped to package operations.
    * @param onPlatformSession - Private credential updates for embedded Platform views.
+   * @param readyTimeoutMs - Startup deadline after which a silent Host is treated as failed and stopped.
    */
   constructor(
     private readonly node: string,
@@ -199,10 +238,12 @@ export class DesktopHostProcess {
     private readonly packageManager?: { readonly pnpm: string; readonly nodeBin: string },
 
     private readonly onPlatformSession?: (session: PlatformSession | null) => void,
+    private readonly readyTimeoutMs: number = HOST_READY_TIMEOUT_MS,
   ) {}
 
   /**
-   * Start this child once and await its Web application URL.
+   * Start this child once and await its Web application URL. A Host that never reports readiness fails at
+   * {@link HOST_READY_TIMEOUT_MS} instead of holding the caller open; the caller's cleanup then stops it.
    * @returns Ready facts supplied by the child after application startup.
    */
   async start(): Promise<DesktopHostReady> {
@@ -222,6 +263,15 @@ export class DesktopHostProcess {
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     })
     this.child = child
+    this.readyDeadline = setTimeout(() => {
+      // Nothing the shell can wait for arrives: a synchronous loop in one plugin holds the Host's event loop, so
+      // even its own `fatal` report could not be sent. Fail here and let the caller's cleanup kill the tree.
+      const suffix = this.stderr.trim() === '' ? '' : `: ${this.stderr.trim()}`
+      this.fail(new DesktopHostReadyTimeoutError(
+        `dsh desktop host did not report readiness within ${String(this.readyTimeoutMs)} ms${suffix}`,
+      ))
+    }, this.readyTimeoutMs)
+    this.readyDeadline.unref()
     child.stderr?.setEncoding('utf8')
     child.stderr?.on('data', (chunk: string) => { this.stderr = (this.stderr + chunk).slice(-MAX_HOST_DIAGNOSTIC_CHARS) })
     child.stdout?.pipe(process.stdout)
@@ -231,7 +281,10 @@ export class DesktopHostProcess {
         child.kill('SIGTERM')
         return
       }
-      if (message.type === 'ready') this.readyResolve({ url: message.url })
+      if (message.type === 'ready') {
+        this.clearReadyDeadline()
+        this.readyResolve({ url: message.url })
+      }
       else if (message.type === 'platform-session') this.onPlatformSession?.(message.session)
       else if (message.type === 'shutdown-complete') {
         if (this.stopping) this.shutdownCompleted = true
@@ -254,6 +307,34 @@ export class DesktopHostProcess {
       })
     })
     return this.readyPromise
+  }
+
+  /**
+   * Ask the Host whether its event loop still answers, without changing anything.
+   * A Host blocked in a plugin's synchronous loop leaves the request unanswered, which is the only symptom an
+   * outside process can observe. When it does answer, the reply also carries how long its loop had been blocked,
+   * which separates a long task from a slow request.
+   * @param deadlineMs - Time the Host is given to answer before the probe reports unresponsive.
+   * @returns The measurement the Host reported with its answer, or undefined when it did not answer in time.
+   */
+  async probe(deadlineMs = 5_000): Promise<DesktopEventLoopDelay | undefined> {
+    // No child, or one already stopping or failed, is owned by its own lifecycle path, not by a probe.
+    if (this.unavailable()) return undefined
+    try {
+      const response = await this.control({ type: 'update-tasks', action: 'inspect' }, deadlineMs,
+        'desktop liveness: probe timed out')
+      return response.type === 'update-tasks' ? response.eventLoopDelay : undefined
+    } catch (error) {
+      // The child can finish exiting between the check above and this answer.
+      if (this.unavailable()) return undefined
+      console.warn('desktop liveness: Host did not answer a probe', error)
+      return undefined
+    }
+  }
+
+  /** Whether this instance currently owns no answerable child; read through a call so it is never narrowed. */
+  private unavailable(): boolean {
+    return this.child === undefined || this.stopping || this.failureReported
   }
 
   /**
@@ -343,6 +424,7 @@ export class DesktopHostProcess {
   async stop(requireGraceful = false): Promise<void> {
     const child = this.child
     if (child === undefined) return
+    this.clearReadyDeadline()
     this.stopping = true
     this.onPlatformSession?.(null)
     if (child.connected) child.send({ type: 'shutdown' }, (error) => { if (error !== null) this.fail(error) })
@@ -362,7 +444,15 @@ export class DesktopHostProcess {
     }
   }
 
+  /** Stop the startup deadline from firing against an attempt that already settled. */
+  private clearReadyDeadline(): void {
+    if (this.readyDeadline === undefined) return
+    clearTimeout(this.readyDeadline)
+    this.readyDeadline = undefined
+  }
+
   private fail(error: Error): void {
+    this.clearReadyDeadline()
     this.onPlatformSession?.(null)
     this.readyReject(error)
     for (const request of this.controlRequests.values()) request.reject(error)

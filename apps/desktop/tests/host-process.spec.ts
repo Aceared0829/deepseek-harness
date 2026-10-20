@@ -2,7 +2,10 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { DesktopHostFatalError, DesktopHostProcess, DesktopHostUncleanExitError, QUIT_INSPECTION_DEADLINE_MS } from '../src/host-process.ts'
+import {
+  DesktopHostFatalError, DesktopHostProcess, DesktopHostReadyTimeoutError, DesktopHostUncleanExitError,
+  HOST_READY_TIMEOUT_MS, QUIT_INSPECTION_DEADLINE_MS,
+} from '../src/host-process.ts'
 
 const roots: string[] = []
 const hosts: DesktopHostProcess[] = []
@@ -74,8 +77,10 @@ function projectWithHost(source = HTTP_HOST): string {
 
 function hostProcess(
   runtime: string, profile = runtime, onFailure?: (error: Error) => void, environment = process.env,
+  readyTimeoutMs?: number,
 ): DesktopHostProcess {
-  const host = new DesktopHostProcess(process.execPath, runtime, profile, undefined, environment, onFailure)
+  const host = new DesktopHostProcess(process.execPath, runtime, profile, undefined, environment, onFailure,
+    undefined, undefined, undefined, readyTimeoutMs)
   hosts.push(host)
   return host
 }
@@ -243,6 +248,72 @@ describe('desktop host process', () => {
     const { url } = await host.start()
     const response = await fetch(url)
     expect(await response.json()).toEqual({ runtime, profile, cwd: realpathSync(profile), nodePath: '/custom', registry: 'https://registry.example.test/', nodeOptions: '--no-warnings', runAsNode: '1', internals: true })
+  })
+
+  it('fails startup when a Host holds its event loop and never reports readiness', async () => {
+    // A synchronous loop keeps the child from reporting anything, including its own fatal diagnostic.
+    const runtime = projectWithHost("process.stderr.write('booting'); setInterval(() => {}, 60_000)")
+    const failure = vi.fn()
+    const host = hostProcess(runtime, runtime, failure, process.env, 200)
+    const error = await host.start().catch((failure: unknown) => failure)
+    expect(error).toBeInstanceOf(DesktopHostReadyTimeoutError)
+    expect((error as Error).message).toContain('did not report readiness within 200 ms')
+    expect((error as Error).message).toContain('booting')
+    expect(failure).toHaveBeenCalledWith(error)
+    // The caller's cleanup owns the stalled tree, and the deadline does not fire again.
+    await host.stop()
+  }, 20_000)
+
+  it('does not fail a Host that reports readiness before its deadline', async () => {
+    vi.useFakeTimers()
+    try {
+      const host = hostProcess(projectWithHost(), undefined, undefined, process.env, 60_000)
+      const ready = host.start()
+      await vi.advanceTimersByTimeAsync(1_000)
+      const { url } = await ready
+      expect(new URL(url).searchParams.get('token')).toBe('fixture')
+      // A deadline still pending after readiness would fail an already-running Host.
+      await vi.advanceTimersByTimeAsync(HOST_READY_TIMEOUT_MS * 2)
+      await expect(host.updateTasks('inspect')).resolves.toBe(false)
+      await host.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  }, 20_000)
+
+  it('defaults the readiness deadline to the exported bound', async () => {
+    const host = new DesktopHostProcess(process.execPath, projectWithHost(), projectWithHost())
+    hosts.push(host)
+    expect(HOST_READY_TIMEOUT_MS).toBeGreaterThanOrEqual(30_000)
+  })
+
+  it('probes a running Host and reports an unanswered one without failing it', async () => {
+    const host = hostProcess(projectWithHost(`
+      let probes = 0
+      process.send({ type: 'ready', url: 'http://127.0.0.1:3080/' })
+      process.on('message', message => {
+        // The first probe answers; the second is the one left unanswered.
+        if (message.type === 'update-tasks' && probes++ === 0) {
+          process.send({ type: 'update-tasks', requestId: message.requestId, active: false,
+            eventLoopDelay: { observedMs: 5000, samples: 5000, p50Ms: 1, p99Ms: 7, maxMs: 320 } })
+        }
+        if (message.type === 'shutdown') process.send({ type: 'shutdown-complete' }, () => process.disconnect())
+      })
+    `))
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await host.start()
+    // An answered probe carries the delay distribution the Host measured, so a stall can be described.
+    await expect(host.probe(500)).resolves.toEqual({ observedMs: 5000, samples: 5000, p50Ms: 1, p99Ms: 7, maxMs: 320 })
+    // An unanswered probe reports no measurement at all, which the shell reads as a missed probe.
+    await expect(host.probe(200)).resolves.toBeUndefined()
+    // An unanswered probe is a report, not a failure: the Host keeps running and is not torn down.
+    await host.stop()
+  }, 20_000)
+
+  it('reports an unavailable Host as unanswered so its own failure path owns the outcome', async () => {
+    const host = hostProcess(projectWithHost())
+    // No child was ever started, so a probe cannot reach one and must not invent a stall.
+    await expect(host.probe(200)).resolves.toBeUndefined()
   })
 
   it.each([

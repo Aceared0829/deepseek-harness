@@ -15,6 +15,7 @@ import { installDesktopUpdateTaskControl } from './update-tasks.ts'
 import { installDesktopQuitInspection } from './quit-inspection.ts'
 import { installPlatformSessionPublisher } from './platform-session.ts'
 import { installOfficeEngineResolution } from './office-engine.ts'
+import { startEventLoopDelaySampler } from './event-loop-delay.ts'
 
 async function main(): Promise<void> {
   const runtimeDir = process.argv[2] as string
@@ -49,10 +50,17 @@ async function main(): Promise<void> {
   } = {}
   const bootLeases = new Map<string, () => void>()
   let nextBootLease = 1
+  /**
+   * Delay sampler, released with the Host. Held in a record because teardown is defined before the application
+   * tree exists, and the sampler can only start once it does.
+   */
+  const sampling: { current?: ReturnType<typeof startEventLoopDelaySampler> } = {}
   const send = createIpcSender(process)
   const stop = (): Promise<void> => stopping ??= (async () => {
     for (const release of bootLeases.values()) release()
     bootLeases.clear()
+    // The histogram owns a timer; releasing it keeps teardown from leaving one armed.
+    sampling.current?.stop()
     // Startup failure is reported by main; shutdown only owns a tree that booted.
     const running = await application.catch(() => undefined)
     await running?.shutdown.shutdown(0)
@@ -125,8 +133,12 @@ async function main(): Promise<void> {
     void (async () => {
       try {
         if (stopping !== undefined || control.updateTasks === undefined) throw new Error('desktop update: Host is unavailable')
-        const active = await control.updateTasks(message.action as 'inspect' | 'lock' | 'unlock')
-        await send({ type: 'update-tasks', requestId: message.requestId, active })
+        const action = message.action as 'inspect' | 'lock' | 'unlock'
+        const active = await control.updateTasks(action)
+        // An inspection is the shell's liveness probe, so it carries the delay distribution observed up to now.
+        // `lock` and `unlock` answer the update handoff, which has no use for the measurement.
+        await send({ type: 'update-tasks', requestId: message.requestId, active,
+          ...action === 'inspect' ? { eventLoopDelay: control.updateTasks.eventLoopDelay() } : {} })
       } catch (error) {
         await send({ type: 'update-tasks', requestId: message.requestId, active: true,
           error: error instanceof Error ? error.message : String(error) })
@@ -135,7 +147,9 @@ async function main(): Promise<void> {
   })
   process.once('disconnect', () => { void stop() })
   const { ctx } = await application
-  control.updateTasks = installDesktopUpdateTaskControl(ctx)
+  // Sampling starts once the tree is up: a startup that never reaches here has its own readiness deadline.
+  sampling.current = startEventLoopDelaySampler()
+  control.updateTasks = installDesktopUpdateTaskControl(ctx, sampling.current)
   control.quitInspection = installDesktopQuitInspection(ctx)
   control.bootInjections = () => {
     const clientModules = ctx.get('clientModules')

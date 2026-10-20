@@ -27,6 +27,8 @@ These rules follow from Harness mechanisms. Confirm every Service method, Event 
 - Keep projection state plain JSON and bump `stateVersion` when fields or fold semantics change. The projection cache then checkpoints it, cold reads replay only the tail, and stale checkpoints are discarded.
 - Wait on durable events such as `turn/end`, `assistant/message`, or `tool/result`; render live tokens from `agent/assistant-stream`. Do not poll `agent/status`. `whenIdle()` does not mean one follow-up finished: several inputs can share one running interval.
 - A timer that starts work calls `agent.followup()`, which wakes the agent; `agent.inject()` does not wake it, so injected context can wait in the inbox until other input arrives. Clear the timer in the owning effect.
+- **Never hold the event loop through a plugin lifecycle hook.** The Host runs one Node event loop, so a synchronous long task in `apply()`, an event listener, a tool body, or a slot injector freezes every session, tool, and HTTP request in the process; nothing inside the process can rescue it. Bound the work per call and hand anything longer to an async path: stream or chunk with `await`, move it to `ctx.subprocess`/`ctx.shell`, or schedule it on a worker. An unbounded `while` loop, a synchronous read of a large file, and a blocking `spawnSync` are all the same failure.
+- The Desktop shell replaces a Host that stops answering its liveness probes, so a hidden infinite loop costs the person whatever that Host was holding. Treat a blocking loop as a defect even when the frozen window eventually recovers.
 
 ## UI
 

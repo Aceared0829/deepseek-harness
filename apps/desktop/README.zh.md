@@ -170,7 +170,15 @@ macOS 上自定义菜单保留 Electron 的标准 Window 菜单及应用隐藏�
 
 [Web 插件 UI](../../packages/client/ui-plugin-manager/README.zh.md)负责管理界面。Desktop profile 初始化和恢复保留已安装插件文件。
 
-主窗口创建、主文档加载、preload、渲染器、Web 初始化或后端的致命失败，会在每个应用进程中打开一次原生恢复对话框。对话框显示首次错误末尾的限长摘要，标明截断情况，并提供退出、重启、禁用第三方插件、备份 profile patch 并重启。启动失败保留 Web 加载页和动画；运行中失败保留当前页面。预期关闭、取消导航和普通请求错误不会触发恢复。共享 Web 插件管理器报告包操作错误；插件变更后的 Host 启动失败会进入原生恢复。不通过启动超时推断故障。 包含 `listen EADDRINUSE` 的监听失败以退出其他正在运行的 DSH 实例的提示替代诊断和重装建议，仅提供退出和重启。
+主窗口创建、主文档加载、preload、渲染器、Web 初始化或后端的致命失败，会在每个应用进程中打开一次原生恢复对话框。对话框显示首次错误末尾的限长摘要，标明截断情况，并提供退出、重启、禁用第三方插件、备份 profile patch 并重启。启动失败保留 Web 加载页和动画；运行中失败保留当前页面。预期关闭、取消导航和普通请求错误不会触发恢复。共享 Web 插件管理器报告包操作错误；插件变更后的 Host 启动失败会进入原生恢复。包含 `listen EADDRINUSE` 的监听失败以退出其他正在运行的 DSH 实例的提示替代诊断和重装建议，仅提供退出和重启。
+
+始终不报告就绪的 Host 会在 `DSH_DESKTOP_HOST_READY_TIMEOUT_MS`（1000 至 2147483647 的整数毫秒，默认 `120000`）处失败，而不是让启动一直保持打开——插件在同步循环里卡死时正是这种表现。该截止时间约束的是沉默，不是启动性能：在它之前报告 `ready` 的 Host 不受影响，调用方的清理会照常逐级升级停止子进程。这种失败与其他就绪前失败一样上报。
+
+Desktop 在 Electron userData 下的 `boot-failures.json` 中保留连续启动失败记录。每次未达到就绪即结束的启动都记录组合指纹（`package.json`、`cordis.yml` 和 `cordis.patch.yml` 的内容）与失败次数；达到就绪会清除该文件。同一组合连续失败 `3` 次后，下一次启动会在 Host 启动前回滚 profile，并在包操作所用的同一把 profile 写锁内进行：把 patch 重命名为 `cordis.patch.yml.bak-<时间戳>` 并恢复随附组合包集合，随后在工作区打开时用原生消息框说明这次回滚。监听冲突（另一个 DSH 实例）永不触发回滚，因为改 profile 修不了它；已回滚过的组合只上报、不再改写自身，因此恢复不会形成循环。无法写入的回滚保持 profile 原样，并让这次启动以自己的诊断失败。
+
+`DSH_DESKTOP_HOST_LIVENESS_INTERVAL_MS`（整数毫秒，默认 `30000`）会探测已就绪的 Host，`DSH_DESKTOP_HOST_STALL_PROBES`（0 至 100 的整数，默认 `3`）则会替换连续错过该次数探测的 Host：壳会清空启动租约、停止子进程、启动替代 Host 并重新加载页面，因此卡住的事件循环——连同它占住的工作——都会消失。按默认值计算那是 90 秒的沉默，而不是一次慢请求。`DSH_DESKTOP_HOST_STALL_RECOVERIES`（1 至 10 的整数，默认 `1`）限定每个应用进程可执行的重启次数；额度用尽后再次卡顿的 Host 会以原生消息框上报，而不是无限重启。把间隔或阈值设为 `0` 可只保留检测、不做替换，供绝不能牺牲长任务的部署使用。
+
+每个得到回答的检查还携带 Host 的事件循环延迟分布（`observedMs`、`samples`、`p50Ms`、`p99Ms`、`maxMs`），由 `monitorEventLoopDelay` 在整个 Host 生命周期内测量。一次事件中首次未作答的探测会写入一份 host 崩溃报告，并引用最后一次测量，因此报告能区分阻塞的循环（`max` 很大而 `p50` 很小）与持续压力（`p99` 在多份样本上都很大）。平台拒绝直方图时只损失这份测量：报告会说明没有可用测量。
 
 原生弹窗详情最多包含 1,200 个 UTF-16 代码单元和八行诊断，若已写入下述崩溃报告则附上其路径。Host 错误诊断仅保留 stderr 输出的最后 64 Ki 个字符。更早的输出会被丢弃，避免长期运行的 Host 使壳的诊断缓冲区无限增长。
 
@@ -351,6 +359,8 @@ node apps/desktop/node_modules/pnpm/bin/pnpm.mjs --dir apps/desktop run test:upd
 ## 底层开发覆盖项
 
 未打包的 Electron 进程使用应用目录下的 `.desktop-build/development/project` 作为开发项目。`DSH_DESKTOP_PNPM_ENTRY` 和 `DSH_DESKTOP_DSH_DIR` 是带应用路径默认值的可选覆盖项。每次未打包启动都必须设置 `DSH_DESKTOP_PRIMARY_RUNTIME_DIR`：开发启动器（`dev:desktop`、`start:desktop` 及工作区更新验证运行器）会把它设置为自己已准备目标的 primary-runtime 目录；缺少该变量的启动会以致命启动对话框失败。启动器必须设置它，因为壳无法从 `process.arch` 推导该目录：构建目标将 Windows 固定为 x64，而宿主可能是 arm64。打包应用会忽略这些变量，从 `process.resourcesPath` 解析签名资源，并使用受管 Desktop profile。
+
+`DSH_DESKTOP_HOST_READY_TIMEOUT_MS` 与 `DSH_DESKTOP_HOST_PROBE_TIMEOUT_MS` 分别调整启动截止时间和单次存活探测的截止时间；`DSH_DESKTOP_HOST_LIVENESS_INTERVAL_MS` 启用探测，`DSH_DESKTOP_HOST_STALL_PROBES` 与 `DSH_DESKTOP_HOST_STALL_RECOVERIES` 设置重启阈值与其额度。五者都是按同样方式校验的整数毫秒或计数，打包与开发构建一致。
 
 <a id="known-limitations"></a>
 
