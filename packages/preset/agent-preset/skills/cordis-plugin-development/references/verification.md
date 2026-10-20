@@ -2,6 +2,26 @@
 
 A bundle's first run must not happen in the profile you are working in. When a plugin breaks the Host, the session that would fix it is the one that no longer starts.
 
+## Prove it opens before you ask for a restart
+
+The staging gate below proves **the Host still starts**. It does not prove **the plugin works**. A plugin that installs cleanly, activates cleanly, and then throws inside its own projection, ships a payload the gateway rejects, or crashes its view is indistinguishable from a working one until a person clicks into it — and by then the only fix is another restart.
+
+**Never ask a person to restart on the strength of green tests and an activated entry.** Before asking, exercise the three stages the product runs, in this order, against real data from the profile you are changing:
+
+1. **Fold** — run the plugin's own state-building path over real input (real session logs, real rows, real files), then push the result through whatever schema or validator the durable layer applies. A throw here is not contained to your plugin: a projection that throws while folding fails for every session, and the tab shows history that never loads.
+2. **Transport** — serialize the payload the way the transport does and require a lossless round trip with no `undefined`. A value the gateway rejects does not fail politely; a rejected session argument can roll back the whole operation that carried it.
+3. **Render** — import the real Client bundle and render the real payload through it. A throw here is a blank tab, which looks exactly like "the plugin did nothing".
+
+One command runs all three when the bundle registers a session projection:
+
+    node scripts/plugin-gate.mjs --bundle <bundle-dir> --fixtures <dir-of-real-input>
+
+It discovers the projection by mounting the plugin against a stub, folds each fixture, checks the wire payload, and renders the real view. Pass `--helper <spec>` when the bundle needs its own `review(input)` instead. Exit codes matter: `0` pass, `1` failed, `2` nothing was checked, `3` a stage could not run. **`2` and `3` are not passes** — report the plugin as unverified rather than working.
+
+Also bound the size of anything that is persisted and rewritten on every change. Unit tests measure correctness, not cost: a row that stores raw tool arguments was correct, passed every test, and reached 470 KB on one session because it grew with every call. Check the distribution (median and worst case), not one sample. The gate reports that distribution and fails a row over `--max-state` (default 128 KB).
+
+If you cannot run one of the three stages — no browser control, no real data — say which one you skipped and treat the plugin as unverified. Do not describe it as working.
+
 ## Stage in a disposable profile
 
 From the DSH checkout that provides this Harness, one command runs the whole gate. When the workspace is not that checkout, invoke the script by absolute path:

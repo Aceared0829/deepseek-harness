@@ -35,7 +35,7 @@ A shipped bundle can resolve a plugin row and leave it `disabled`. The row id an
 
 ## Read next
 
-The files below live in this skill's base directory, which the `skill` tool reported, and the table is the complete list: do not enumerate that directory. In every deployment, including a source checkout, read these files with the file-read tool, write copies into the workspace with the file-write tool, and verify a copy by reading it back. In Desktop the directory sits inside `app.asar`, which only the Host process's own file reads can open; shell commands (`ls`, `cat`, `cp`, `cmp`), the glob and search tools (they run a native ripgrep process), `node`, and pnpm all fail on it. Never install or syntax-check a template in place; copy its contents into the workspace first.
+The files below live in this skill's base directory, which the `skill` tool reported, and the table is the complete list: do not enumerate that directory. In every deployment, including a source checkout, read these files with the file-read tool, write copies into the workspace with the file-write tool, and verify a copy by reading it back. In Desktop the directory sits inside `app.asar`, which only the Host process's own file reads can open; shell commands, the glob and search tools, and `node` all fail on it. Never install or syntax-check a template in place; copy it into the workspace first.
 
 | Task | File |
 |---|---|
@@ -46,5 +46,6 @@ The files below live in this skill's base directory, which the `skill` tool repo
 | UI plugin template, including display resources | `templates/decoration/package.json`, `templates/decoration/cordis.patch.yml`, `templates/decoration/index.js`, `templates/decoration/client.js`, `templates/decoration/locale/en.json`, `templates/decoration/icon.svg` |
 | MCP bundle template, including display resources | `templates/mcp/package.json`, `templates/mcp/cordis.patch.yml`, `templates/mcp/locale/en.json`, `templates/mcp/icon.svg` |
 | Loader patch dialect and the list of installable plugin packages | the `cordis-composition-reference` skill |
-| Choosing extension points, contexts, and state mechanisms for upgrade stability and performance | `references/practices.md` |
+| Choosing extension points, contexts, and state mechanisms | `references/practices.md` |
+| Performance and UI rules for a view or lifecycle hook | `references/practices-runtime.md` |
 | Sharing application operations between UI actions and agent tools | `references/user-actions.md` |
