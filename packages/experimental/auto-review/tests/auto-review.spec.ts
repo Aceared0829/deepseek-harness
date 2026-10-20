@@ -386,8 +386,15 @@ describe('native review request', () => {
       provider: 'review',
       model: 'same-model',
       system: EXPECTED_REVIEW_POLICY,
-      temperature: 0,
     })
+    // `temperature` is deliberately absent. Pinning it to 0 made every review
+    // routed to a provider that rejects the field fail with
+    // "request parameters were rejected", and a failed review refuses the tool
+    // body it was meant to police — 42 tool calls across 9 sessions on the
+    // deployment where this was measured. The decision is a discrete
+    // classification; determinism at 0 bought little the policy text does not.
+    // Re-pin it only behind the catalog's `supportsTemperature`.
+    expect(request).not.toHaveProperty('temperature')
     expect(request).not.toHaveProperty('sessionId')
     expect(request.maxTokens).toBeUndefined()
     expect(request.tools).toBeUndefined()
