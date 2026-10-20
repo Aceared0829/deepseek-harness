@@ -210,44 +210,88 @@ function firstDivergence(original, reparsed, path = '$', seen = new WeakSet()) {
 }
 
 /**
+ * Resolve a plugin's declared Config the way Cordis does.
+ *
+ * A plugin that exports `Config` receives the resolved object; one that does not
+ * receives `{}`. Discovery has to hand it a real value, because plugins read
+ * `config.x` at the top of `apply` and a required field that is missing means the
+ * bundle genuinely cannot mount — the product would fail the same way. Resolving
+ * through the plugin's own schema keeps that verdict honest instead of papering
+ * over it with a fabricated value.
+ *
+ * Schemastery resolves from `meta.default`, so a schema whose defaults do not
+ * satisfy its own required fields is a real defect and the throw is passed on.
+ * @param plugin - the host module.
+ * @returns the resolved config, or throws with the schema's own message.
+ */
+function resolveConfig(plugin) {
+  const schema = plugin.Config
+  if (schema === undefined) return {}
+  return schema((schema.meta?.default) ?? {})
+}
+
+/**
  * Find a projection definition by mounting the plugin against a stub context.
  *
  * The plugin is not started: this captures whatever it registers, which is how
  * the product itself discovers the unit.
  *
+ * Two things about the real contract shape this stub. Cordis resolves `Config`
+ * before invoking the callback, so `apply` never receives `undefined` and
+ * plugins read `config.x` at the top of the body; passing `undefined` here made
+ * a healthy plugin throw before it registered. And a property read for a
+ * service this stub does not model must not throw either, so unmodelled names
+ * resolve to a permissive callable instead of `undefined`.
+ *
  * `apply` may be `async` — Cordis accepts both — and a registration made after
  * an `await` is not visible to a synchronous probe. The returned promise is
  * therefore awaited before this function decides the bundle registers nothing.
  * @param plugin - the host module.
- * @returns the definition, or undefined when the bundle registers none.
+ * @returns every registered definition, in registration order.
  */
-async function discoverProjection(plugin) {
-  let definition
+async function discoverProjections(plugin) {
+  const definitions = []
   const noop = () => () => {}
+  /** A service stand-in: callable, and any property on it is another stand-in. */
+  const service = () => new Proxy(function () {}, {
+    get: (_target, key) => (key === 'then' ? undefined : service()),
+    apply: () => service(),
+    has: () => true,
+  })
   const stub = new Proxy({}, {
     get: (_target, key) => {
       if (key === 'sessionProjections') {
-        return { register: value => { definition = value; return () => {} } }
+        return { register: value => { definitions.push(value); return () => {} } }
       }
       if (key === 'effect' || key === 'on' || key === 'plugin' || key === '$on') return noop
       if (key === 'get') return () => undefined
-      if (key === 'inject') return () => noop()
-      // Anything else is a service this stub does not provide; a property read
-      // must not throw, or discovery fails on a correct plugin.
-      return undefined
+      // `ctx.inject([...], cb)` is the documented way to register only when a
+      // service exists, so the callback has to run for discovery to see it.
+      if (key === 'inject') return (_deps, callback) => {
+        if (typeof callback === 'function') callback(stub)
+        return noop()
+      }
+      return service()
     },
     has: () => true,
   })
+  // A config that cannot be resolved is reported, not papered over.
+  let config
   try {
-    await plugin.apply(stub, undefined)
+    config = resolveConfig(plugin)
+  } catch (error) {
+    throw new Error(`the plugin's own Config rejects its defaults, so it cannot mount (${error instanceof Error ? error.message : String(error)})`)
+  }
+  try {
+    await plugin.apply(stub, config)
   } catch (error) {
     // A plugin that throws while mounting under a stub is still discoverable
     // when it registered before throwing; the caller decides.
-    if (definition === undefined) {
+    if (definitions.length === 0) {
       throw new Error(`mounting the plugin threw: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
-  return definition
+  return definitions
 }
 
 /**
@@ -257,7 +301,12 @@ async function discoverProjection(plugin) {
  * @returns a render function, or undefined when it cannot be mounted.
  */
 async function loadClient(clientPath, bundleDir) {
-  if (!existsSync(clientPath)) return undefined
+  if (!existsSync(clientPath)) {
+    // Without this the skip says "(unknown reason)" for the most common case of
+    // all: a Host-only bundle that ships no browser half.
+    lastClientError = `no browser half at ${clientPath}`
+    return undefined
+  }
   // React is shell-provided; the bundle must not import it, so the gate has to
   // supply it. Node's own resolver is used rather than a guessed path, because
   // the shell modules sit in the pnpm store and not at a fixed depth. The repo
@@ -466,19 +515,19 @@ async function main(argv) {
     return finish(state, options, reviewed)
   }
 
-  // No helper: use the projection the bundle registers.
-  let definition
+  // No helper: use every projection the bundle registers.
+  let definitions
   try {
-    definition = await discoverProjection(plugin)
+    definitions = await discoverProjections(plugin)
   } catch (error) {
     fail(state, error instanceof Error ? error.message : String(error))
     return finish(state, options, 0)
   }
-  if (definition === undefined) {
+  if (definitions.length === 0) {
     skip(state, 'the bundle registers no session projection, and no --helper was given')
     return finish(state, options, 0)
   }
-  pass(`the bundle registers projection "${definition.key}" v${definition.stateVersion}`)
+  pass(`the bundle registers ${definitions.length} projection(s): ${definitions.map(unit => `${unit.key} v${unit.stateVersion}`).join(', ')}`)
 
   if (options.fixtures === undefined) {
     skip(state, 'no --fixtures; the fold and the view over real data are unverified')
@@ -494,87 +543,97 @@ async function main(argv) {
   const sizes = []
   let checked = 0
   let rendered = 0
+  let renderExpected = 0
   let foldedEvents = 0
   // `wire` is optional in the contract ("omit for host-only units"), so a bundle
   // without one has no third stage and no second stage either. Say so instead of
   // failing a correct bundle on a TypeError.
-  const hostOnly = definition.wire === undefined
-  if (hostOnly) skip(state, `"${definition.key}" is host-only (no wire view); transport and render have nothing to verify`)
-  for (const input of targeted) {
-    let state_ = definition.init({ id: 'gate-probe', createdAt: 0 })
-    let events
-    try {
-      events = readEvents(input)
-    } catch (error) {
-      fail(state, `${input}: cannot read input (${error instanceof Error ? error.message : String(error)})`)
-      continue
-    }
+  const hostOnly = definitions.every(unit => unit.wire === undefined)
+  if (hostOnly) {
+    skip(state, 'every projection is host-only (no wire view); transport and render have nothing to verify')
+  }
+  for (const definition of definitions) {
+    const unitHostOnly = definition.wire === undefined
+    for (const input of targeted) {
+      const label = definitions.length > 1 ? `${definition.key}: ${input}` : input
+      let events
+      try {
+        events = readEvents(input)
+      } catch (error) {
+        fail(state, `${label}: cannot read input (${error instanceof Error ? error.message : String(error)})`)
+        continue
+      }
     // A fixture that yields no events folds nothing, so every later stage
     // passes on the untouched `init` state. Counting it as verified is how a
     // gate goes green over input it never read.
-    if (events.length === 0) {
-      skip(state, `${input}: no events to fold; this input verifies nothing`)
-      continue
-    }
-    // 1. Fold.
-    let stateBytes
-    try {
-      for (const event of events) state_ = definition.apply(state_, event)
-      definition.stateSchema?.parse(state_)
-      // Measuring can throw on a cycle or a bigint and is part of the fold's
-      // contract, so it stays inside this guard rather than aborting the run.
-      stateBytes = JSON.stringify(JSON.parse(JSON.stringify(state_))).length
-    } catch (error) {
-      fail(state, `${input}: fold threw (${error instanceof Error ? error.message : String(error)})`)
-      continue
-    }
-    foldedEvents += events.length
-    // 2. Transport. A host-only unit has nothing to send.
-    let view
-    if (!hostOnly) {
-      try {
-        view = definition.wire.view(state_)
-        definition.wire.viewSchema?.parse(view)
-      } catch (error) {
-        fail(state, `${input}: wire.view threw (${error instanceof Error ? error.message : String(error)})`)
+      if (events.length === 0) {
+        skip(state, `${label}: no events to fold; this input verifies nothing`)
         continue
       }
-      const undefinedKeys = undefinedPaths(view)
-      if (undefinedKeys.length > 0) {
-        fail(state, `${input}: view carries undefined at ${undefinedKeys.slice(0, 3).join(', ')}`)
+      // 1. Fold. `init` receives the header and the inherited-event offset the
+      // product passes; a unit whose state carries the offset would otherwise
+      // fail its own schema on a fabricated one-argument call.
+      let state_ = definition.init({ id: 'gate-probe', createdAt: 0, version: 4, isSeeded: false }, 0)
+      let stateBytes
+      try {
+        for (const event of events) {
+          const next = definition.apply(state_, event)
+          state_ = next === undefined ? state_ : next
+        }
+        definition.stateSchema?.parse(state_)
+        // Measuring can throw on a cycle or a bigint and is part of the fold's
+        // contract, so it stays inside this guard rather than aborting the run.
+        stateBytes = JSON.stringify(JSON.parse(JSON.stringify(state_))).length
+      } catch (error) {
+        fail(state, `${label}: fold threw (${error instanceof Error ? error.message : String(error)})`)
+        continue
       }
-    }
-    if (!hostOnly) {
-      // `JSON.stringify(JSON.parse(serialized)) === serialized` is a tautology
-      // for any stable key order, so comparing the text proves nothing. Compare
-      // the values instead: that catches `NaN`/`Infinity` turning into `null`
-      // and functions or symbols being dropped, neither of which `stringify`
-      // reports. The undefined scan above stays, because a dropped `undefined`
-      // leaves no trace in either form.
-      const serialized = JSON.stringify(view)
-      if (serialized === undefined) {
-        fail(state, `${input}: view is not serializable`)
-      } else {
-        const reparsed = JSON.parse(serialized)
-        const drift = firstDivergence(view, reparsed)
-        if (drift !== undefined) {
-          fail(state, `${input}: view changes through JSON at ${drift}`)
+      foldedEvents += events.length
+      // 2. Transport. A host-only unit has nothing to send.
+      let view
+      if (!unitHostOnly) {
+        try {
+          view = definition.wire.view(state_)
+          definition.wire.viewSchema?.parse(view)
+        } catch (error) {
+          fail(state, `${label}: wire.view threw (${error instanceof Error ? error.message : String(error)})`)
+          continue
+        }
+        const undefinedKeys = undefinedPaths(view)
+        if (undefinedKeys.length > 0) {
+          fail(state, `${label}: view carries undefined at ${undefinedKeys.slice(0, 3).join(', ')}`)
+        }
+        // `JSON.stringify(JSON.parse(serialized)) === serialized` is a tautology
+        // for any stable key order, so comparing the text proves nothing.
+        // Compare the values instead: that catches `NaN`/`Infinity` turning into
+        // `null` and functions or symbols being dropped, neither of which
+        // `stringify` reports. The undefined scan above stays, because a dropped
+        // `undefined` leaves no trace in either form.
+        const serialized = JSON.stringify(view)
+        if (serialized === undefined) {
+          fail(state, `${label}: view is not serializable`)
+        } else {
+          const drift = firstDivergence(view, JSON.parse(serialized))
+          if (drift !== undefined) fail(state, `${label}: view changes through JSON at ${drift}`)
         }
       }
-    }
-    sizes.push(stateBytes)
-    if (stateBytes > options.maxState) {
-      fail(state, `${input}: state is ${stateBytes} bytes, over the ${options.maxState} budget`)
-    }
-    checked += 1
-    // 3. Render.
-    if (client === undefined || hostOnly) continue
-    try {
-      const markup = client.render(view)
-      if (typeof markup !== 'string' || markup === '') fail(state, `${input}: render produced no markup`)
-      else rendered += 1
-    } catch (error) {
-      fail(state, `${input}: render threw (${error instanceof Error ? error.message : String(error)})`)
+      sizes.push(stateBytes)
+      if (stateBytes > options.maxState) {
+        fail(state, `${label}: state is ${stateBytes} bytes, over the ${options.maxState} budget`)
+      }
+      checked += 1
+      // 3. Render.
+      if (client === undefined || unitHostOnly) continue
+      // Counted per payload rather than per run, so a bundle with several
+      // projections cannot hide an unrendered one behind another's success.
+      renderExpected += 1
+      try {
+        const markup = client.render(view)
+        if (typeof markup !== 'string' || markup === '') fail(state, `${label}: render produced no markup`)
+        else rendered += 1
+      } catch (error) {
+        fail(state, `${label}: render threw (${error instanceof Error ? error.message : String(error)})`)
+      }
     }
   }
 
@@ -584,8 +643,11 @@ async function main(argv) {
   // render stage only counts as verified when it ran for every folded payload.
   if (client !== undefined) {
     if (rendered > 0) pass(`rendered ${rendered} payload(s)`)
-    if (rendered < checked) {
-      fail(state, `render verified ${rendered} of ${checked} payload(s)`)
+    // Compared against the payloads that actually had a view to render, so a
+    // bundle with several projections cannot hide an unrendered one behind
+    // another projection's success.
+    if (rendered < renderExpected) {
+      fail(state, `render verified ${rendered} of ${renderExpected} payload(s)`)
     }
   }
   if (sizes.length > 0) {
@@ -698,29 +760,85 @@ function readEvents(path) {
 }
 
 /** Zstd frame magic; every appended session-log line starts one. */
-const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
+/** Zstd frame magic, little-endian, as a uint32 so it compares without a Buffer. */
+const ZSTD_MAGIC_U32 = 0xfd2fb528
 
 /**
  * Decompress every zstd frame in a buffer.
+ *
+ * `zlib.zstdDecompressSync` returns only the first frame of a multi-frame buffer
+ * and does not throw, and the harness writes one frame per appended line, so the
+ * frames have to be located first. Boundaries come from walking each frame's
+ * header and block structure rather than scanning for the magic bytes: that
+ * four-byte pattern also occurs inside compressed data, and splitting there
+ * drops both halves silently.
+ *
+ * A frame that cannot be decoded is reported, not skipped. A corrupt fixture
+ * that folds as a shorter log — or an empty one — must not reach PASS.
  * @param buffer - raw bytes.
  * @returns the concatenated text.
  */
 function decodeFrames(buffer) {
-  const starts = []
-  for (let at = buffer.indexOf(ZSTD_MAGIC); at >= 0; at = buffer.indexOf(ZSTD_MAGIC, at + 4)) {
-    starts.push(at)
-  }
-  if (starts.length === 0) return buffer.toString('utf8')
+  // Not zstd at all: a plain-text fixture the caller named with a .zstd suffix.
+  if (buffer.length < 4 || buffer.readUInt32LE(0) !== ZSTD_MAGIC_U32) return buffer.toString('utf8')
   const parts = []
-  for (let index = 0; index < starts.length; index += 1) {
-    const end = index + 1 < starts.length ? starts[index + 1] : buffer.length
-    try {
-      parts.push(zstdDecompressSync(buffer.subarray(starts[index], end)).toString('utf8'))
-    } catch {
-      // A frame cut short by a concurrent append: keep the rest.
+  let offset = 0
+  let index = 0
+  while (offset < buffer.length) {
+    const end = zstdFrameEnd(buffer, offset)
+    if (end === undefined) {
+      // A torn tail from a concurrent append: the frames before it are real, and
+      // the caller is told how much was dropped.
+      console.warn(`  NOTE  frame ${index} at byte ${offset} is incomplete; ${buffer.length - offset} byte(s) ignored`)
+      break
     }
+    try {
+      parts.push(zstdDecompressSync(buffer.subarray(offset, end)).toString('utf8'))
+    } catch (error) {
+      throw new Error(`frame ${index} at byte ${offset} does not decompress (${error instanceof Error ? error.message : String(error)})`)
+    }
+    offset = end
+    index += 1
   }
   return parts.join('')
+}
+
+/**
+ * Find where the frame starting at `start` ends, by walking its structure.
+ * @param buffer - raw bytes.
+ * @param start - frame start, at the magic number.
+ * @returns the exclusive end offset, or undefined when the frame is incomplete.
+ */
+function zstdFrameEnd(buffer, start) {
+  let offset = start + 4
+  if (offset >= buffer.length) return undefined
+  const descriptor = buffer.readUInt8(offset)
+  offset += 1
+  // The reserved bit is a hard error; a set bit means the frame is not zstd.
+  if (descriptor & 0x08) throw new Error(`invalid Zstandard frame descriptor at byte ${start + 4}`)
+  const contentSizeFlag = descriptor >> 6
+  const singleSegment = (descriptor >> 5) & 1
+  const checksumFlag = (descriptor >> 2) & 1
+  const dictIdFlag = descriptor & 3
+  if (!singleSegment) offset += 1
+  offset += [0, 1, 2, 4][dictIdFlag]
+  offset += [singleSegment ? 1 : 0, 2, 4, 8][contentSizeFlag]
+  for (;;) {
+    if (offset + 3 > buffer.length) return undefined
+    const header = buffer.readUIntLE(offset, 3)
+    offset += 3
+    const last = header & 1
+    const type = (header >> 1) & 3
+    const size = header >> 3
+    if (type === 3) throw new Error(`reserved Zstandard block type at byte ${offset - 3}`)
+    // Both raw and RLE blocks advance by `size`; a compressed block's bytes are
+    // never larger than its declared size.
+    offset += size
+    if (offset > buffer.length) return undefined
+    if (last) break
+  }
+  if (checksumFlag) offset += 4
+  return offset > buffer.length ? undefined : offset
 }
 
 /**
@@ -766,11 +884,38 @@ function finish(state, options, checked) {
   return 0
 }
 
-if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+/**
+ * Whether this module was launched as the program, rather than imported.
+ *
+ * A plain string comparison misses a drive-letter case difference, an 8.3 short
+ * path, or a symlinked invocation on Windows; the script would then do nothing
+ * and exit 0, which looks like a passing gate with no output. `realpathSync`
+ * normalizes all three. When it cannot resolve, fall back to the string
+ * comparison rather than silently deciding not to run.
+ * @returns true when this file is the entry point.
+ */
+function launchedDirectly() {
+  const argument = process.argv[1]
+  if (argument === undefined) return false
+  const self = fileURLToPath(import.meta.url)
+  try {
+    return realpathSync(argument) === realpathSync(self)
+  } catch {
+    return resolve(argument) === self
+  }
+}
+
+if (launchedDirectly()) {
   try {
     process.exitCode = await main(process.argv.slice(2))
   } catch (error) {
-    console.error(`gate could not run: ${error instanceof Error ? error.message : String(error)}`)
+    const message = error instanceof Error ? error.message : String(error)
+    // A caller that asked for JSON gets JSON on stdout even on this path; the
+    // usage text and the message go to stderr so the stream stays parseable.
+    if (process.argv.includes('--json')) {
+      process.stdout.write(`${JSON.stringify({ ok: false, verdict: 'error', error: message }, null, 2)}\n`)
+    }
+    console.error(`gate could not run: ${message}`)
     process.exitCode = 1
   }
 }
