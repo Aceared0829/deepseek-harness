@@ -40,7 +40,7 @@
  * nothing outside its own temporary directory.
  */
 
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { zstdDecompressSync } from 'node:zlib'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -52,11 +52,18 @@ const require = createRequire(import.meta.url)
 /** Why the browser half could not be mounted, reported instead of a bare skip. */
 let lastClientError
 
+/**
+ * Where the progress lines go. `--json` promises a machine-readable stdout, so
+ * once it is parsed every human line moves to stderr and stdout carries the
+ * result object alone.
+ */
+let progress = line => console.log(line)
+
 /** Line-prefix style shared with stage-verify.mjs. */
-const pass = message => console.log(`  PASS  ${message}`)
-const fail = (state, message) => { state.failures.push(message); console.log(`  FAIL  ${message}`) }
-const skip = (state, message) => { state.skipped.push(message); console.log(`  SKIP  ${message}`) }
-const info = message => console.log(`        ${message}`)
+const pass = message => progress(`  PASS  ${message}`)
+const fail = (state, message) => { state.failures.push(message); progress(`  FAIL  ${message}`) }
+const skip = (state, message) => { state.skipped.push(message); progress(`  SKIP  ${message}`) }
+const info = message => progress(`        ${message}`)
 
 /**
  * Parse the command line.
@@ -79,6 +86,16 @@ function parseArgs(argv) {
     if (next === undefined || next.startsWith('--')) throw new Error(`${arg} needs a value`)
     return next
   }
+  const count = (index, arg, minimum) => {
+    const raw = value(index, arg)
+    const parsed = Number(raw)
+    // `Number('abc')` is NaN and every comparison against NaN is false, so an
+    // unvalidated budget silently disables the check it configures.
+    if (!Number.isSafeInteger(parsed) || parsed < minimum) {
+      throw new Error(`${arg} needs an integer >= ${minimum}, got ${JSON.stringify(raw)}`)
+    }
+    return parsed
+  }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     if (arg === '--json') out.json = true
@@ -87,8 +104,8 @@ function parseArgs(argv) {
     else if (arg === '--client') out.client = value(++index, arg)
     else if (arg === '--fixtures') out.fixtures = value(++index, arg)
     else if (arg === '--helper') out.helper = value(++index, arg)
-    else if (arg === '--max-state') out.maxState = Number(value(++index, arg))
-    else if (arg === '--limit') out.limit = Number(value(++index, arg))
+    else if (arg === '--max-state') out.maxState = count(++index, arg, 1)
+    else if (arg === '--limit') out.limit = count(++index, arg, 0)
     else if (arg === '--help' || arg === '-h') { printUsage(); process.exit(0) }
     else throw new Error(`unknown argument ${JSON.stringify(arg)}`)
   }
@@ -96,6 +113,7 @@ function parseArgs(argv) {
     printUsage()
     throw new Error('--bundle is required')
   }
+  if (out.json) progress = line => console.error(line)
   return out
 }
 
@@ -225,9 +243,24 @@ async function loadClient(clientPath, bundleDir) {
     return undefined
   }
   const renderToStaticMarkup = modules.renderToStaticMarkup
-  globalThis.window = { __ModuleLoader__: { load: value => { globalThis.__registration = value } } }
-  await import(pathToFileURL(clientPath).href)
-  const registration = globalThis.__registration
+  // The bundle is written against the page's globals, so they have to be
+  // installed to import it — and removed again, or this process keeps a fake
+  // `window` and a stale registration for everything that runs after the gate.
+  const previousWindow = globalThis.window
+  const previousRegistration = globalThis.__registration
+  let registration
+  try {
+    globalThis.window = { __ModuleLoader__: { load: value => { globalThis.__registration = value } } }
+    globalThis.__registration = undefined
+    await import(pathToFileURL(clientPath).href)
+    // Read the result before the restore below removes it.
+    registration = globalThis.__registration
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+    if (previousRegistration === undefined) delete globalThis.__registration
+    else globalThis.__registration = previousRegistration
+  }
   if (registration === undefined) {
     lastClientError = 'the bundle did not call window.__ModuleLoader__.load'
     return undefined
@@ -283,7 +316,7 @@ async function main(argv) {
   const state = { failures: [], skipped: [] }
   const bundleDir = resolve(options.bundle)
   if (!existsSync(bundleDir)) throw new Error(`bundle directory does not exist: ${bundleDir}`)
-  console.log(`gate: ${bundleDir}`)
+  progress(`gate: ${bundleDir}`)
 
   const modulePath = resolve(bundleDir, options.module)
   if (!existsSync(modulePath)) throw new Error(`host module does not exist: ${modulePath}`)
@@ -306,19 +339,34 @@ async function main(argv) {
     if (targeted.length === 0) {
       skip(state, 'no fixtures given; the helper had nothing to run over')
     }
+    // The helper returns `render` when it can render the view itself; a helper
+    // that returns one but never gets asked would leave the third stage
+    // reported as done while it never ran.
     let reviewed = 0
+    let rendered = 0
     for (const input of targeted) {
+      let outcome
       try {
-        const outcome = await helper.review(input)
-        if (outcome?.stateBytes !== undefined && outcome.stateBytes > options.maxState) {
-          fail(state, `${input}: state is ${outcome.stateBytes} bytes, over the ${options.maxState} budget`)
-        }
-        reviewed += 1
+        outcome = await helper.review(input)
       } catch (error) {
         fail(state, `${input}: review threw (${error instanceof Error ? error.message : String(error)})`)
+        continue
+      }
+      if (outcome?.stateBytes !== undefined && outcome.stateBytes > options.maxState) {
+        fail(state, `${input}: state is ${outcome.stateBytes} bytes, over the ${options.maxState} budget`)
+      }
+      reviewed += 1
+      if (typeof outcome?.render !== 'function') continue
+      try {
+        const markup = await outcome.render()
+        if (typeof markup !== 'string' || markup === '') fail(state, `${input}: render produced no markup`)
+        else rendered += 1
+      } catch (error) {
+        fail(state, `${input}: render threw (${error instanceof Error ? error.message : String(error)})`)
       }
     }
     if (reviewed > 0) pass(`the helper reviewed ${reviewed} input(s)`)
+    if (rendered > 0) pass(`the helper rendered ${rendered} payload(s)`)
     return finish(state, options, reviewed)
   }
 
@@ -414,19 +462,36 @@ async function main(argv) {
 
 /**
  * List input files under a directory, newest last.
+ *
+ * A symlink pointing back up the tree would otherwise recurse forever, so
+ * directories are visited once and a link is followed only while it stays
+ * inside the root that was asked for.
  * @param directory - directory to scan.
  * @returns absolute paths.
  */
 function listInputs(directory) {
   const root = resolve(directory)
   if (!existsSync(root)) return []
-  const found = []
-  for (const name of readdirSync(root)) {
-    const path = join(root, name)
-    if (statSync(path).isDirectory()) found.push(...listInputs(path))
-    else found.push(path)
+  const visited = new Set()
+  const walk = current => {
+    let real
+    try {
+      real = realpathSync(current)
+    } catch {
+      return []
+    }
+    if (visited.has(real)) return []
+    visited.add(real)
+    const found = []
+    for (const name of readdirSync(current)) {
+      const path = join(current, name)
+      const entry = statSync(path)
+      if (entry.isDirectory()) found.push(...walk(path))
+      else found.push(path)
+    }
+    return found
   }
-  return found.sort()
+  return walk(root).sort()
 }
 
 /**
@@ -492,26 +557,38 @@ function decodeFrames(buffer) {
  * @returns the exit code.
  */
 function finish(state, options, checked) {
+  const verdict = state.failures.length > 0
+    ? 'failed'
+    : checked === 0
+      ? 'nothing-checked'
+      : state.skipped.length > 0
+        ? 'partial'
+        : 'passed'
   const result = {
-    ok: state.failures.length === 0 && checked > 0 && state.skipped.length === 0,
+    ok: verdict === 'passed',
+    verdict,
     checked,
     failures: state.failures,
     skipped: state.skipped,
   }
-  if (options.json) console.log(JSON.stringify(result, null, 2))
-  if (state.failures.length > 0) {
-    console.log(`\nFAILED — ${state.failures.length} problem(s). Do not ask for a restart.`)
+  // `--json` promises machine-readable stdout, so the human summary goes to
+  // stderr; mixing the two makes the stream unparseable for a caller that
+  // asked for JSON precisely to parse it.
+  if (options.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
+  const report = progress
+  if (verdict === 'failed') {
+    report(`\nFAILED — ${state.failures.length} problem(s). Do not ask for a restart.`)
     return 1
   }
-  if (checked === 0) {
-    console.log('\nNOTHING CHECKED — this is not a pass. Supply --fixtures or --helper.')
+  if (verdict === 'nothing-checked') {
+    report('\nNOTHING CHECKED — this is not a pass. Supply --fixtures or --helper.')
     return 2
   }
-  if (state.skipped.length > 0) {
-    console.log(`\nPARTIAL — ${state.skipped.length} stage(s) could not run. Report the plugin as unverified, not as working.`)
+  if (verdict === 'partial') {
+    report(`\nPARTIAL — ${state.skipped.length} stage(s) could not run. Report the plugin as unverified, not as working.`)
     return 3
   }
-  console.log('\nPASS — the host folds, the transport accepts, and the view renders. Safe to restart.')
+  report('\nPASS — the host folds, the transport accepts, and the view renders. Safe to restart.')
   return 0
 }
 
