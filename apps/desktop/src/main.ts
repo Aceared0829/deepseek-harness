@@ -24,13 +24,15 @@ import {
 } from 'electron'
 import { resolveDesktopPaths } from './paths.ts'
 import { DesktopProjectManager } from './project-manager.ts'
-import { DesktopHostFatalError, DesktopHostProcess, DesktopHostUncleanExitError } from './host-process.ts'
+import { DesktopHostFatalError, DesktopHostProcess, DesktopHostUncleanExitError, HOST_READY_TIMEOUT_MS } from './host-process.ts'
 import { DesktopPlatformView, PLATFORM_IPC, platformBounds } from './platform-view.ts'
 import { installDesktopDirectoryPicker } from './directory-picker.ts'
 import { installMicrophonePermissions } from './microphone-permissions.ts'
-import { DesktopBackendController } from './backend-controller.ts'
+import { DesktopBackendController, type DesktopBackendHost } from './backend-controller.ts'
+import type { DesktopEventLoopDelay } from './host-process.ts'
 import { DESKTOP_IPC, SCHEME, assertDesktopSender, type DesktopUpdateState } from './ipc.ts'
 import { readDeviceInfo } from './device-info.ts'
+import { resolveDurationMs, resolveLivenessInterval, resolveProbeDeadline, resolveStallProbes, resolveStallRecoveries } from './duration-env.ts'
 import { desktopUpdateReadyConfirmation, formatDesktopMessage, resolveDesktopLocale, resolveDesktopStartupLocale } from './locale.ts'
 import { claimDesktopSingleInstance } from './single-instance.ts'
 import { desktopUpdateChannel } from './update-channel.ts'
@@ -43,6 +45,7 @@ import { openWelcomeWindow } from './welcome-window.ts'
 import { WELCOME_IPC, needsWelcome, type WelcomeNotice } from './welcome-api.ts'
 import { connectDesktopWelcome, type DesktopWelcomeBackend } from './welcome-backend.ts'
 import { DesktopUpdateJournal } from './update-journal.ts'
+import { DesktopBootJournal } from './boot-journal.ts'
 import { DesktopUpdatePreparationError } from './update-error.ts'
 import { DesktopUpdateSchedule, resolveDesktopUpdateScheduleConfig } from './update-schedule.ts'
 import { desktopUpdateErrorSummary, presentDesktopUpdate } from './update-presentation.ts'
@@ -79,6 +82,19 @@ let windowsLanguage: string | undefined
 let backendReady = false
 /** Error-level console output of the primary window, attached to crash reports. */
 const rendererConsole = new RendererConsoleTail()
+/** Unanswered liveness probes of the current Host, reported once per episode. */
+let missedProbes = 0
+
+/**
+ * Describe the delay the Host last measured, so a stall report says whether its loop was blocked and for how long.
+ * @param delay - Measurement from the last answered probe, if one was recorded.
+ * @returns One sentence for the crash report; never empty.
+ */
+function describeDelay(delay: DesktopEventLoopDelay | undefined): string {
+  if (delay === undefined || delay.samples === 0) return 'No event-loop delay measurement was available.'
+  return `Before that, its event loop was blocked for up to ${String(delay.maxMs)} ms`
+    + ` (p99 ${String(delay.p99Ms)} ms, p50 ${String(delay.p50Ms)} ms over ${String(delay.observedMs)} ms).`
+}
 
 // Platform-conventional logs directory (macOS ~/Library/Logs/<name>, otherwise under userData);
 // set before ready so the first fatal report already resolves under it.
@@ -327,6 +343,9 @@ async function main(): Promise<void> {
     : join(process.resourcesPath, 'runtime', 'primary-runtime')
   const activeProject = paths.profile
   const manager = new DesktopProjectManager(paths, resources)
+  // Shell-owned evidence of launches that never reached readiness. It lives beside the settings, not in the
+  // profile, so rolling the profile back cannot lose the record that authorizes the rollback.
+  const bootJournal = new DesktopBootJournal(app.getPath('userData'), activeProject)
   // Dock and Finder launches inherit only launchd's environment; every Host shares one login-shell read.
   const loginShellRead = new AbortController()
   // The probe runs in its own process group, which outlives Desktop unless the read is aborted.
@@ -516,12 +535,119 @@ async function main(): Promise<void> {
   }
   const platformView = new DesktopPlatformView(join(app.getAppPath(), 'lib', 'preload-platform-account.cjs'),
     () => locale.id === 'zh-CN' ? 'zh_CN' : 'en_US', process.platform === 'win32' ? 'win32' : 'darwin')
+  /** Liveness probe cadence; `0` (the default) leaves the running Host unprobed. */
+  const livenessIntervalMs = resolveLivenessInterval(process.env)
+  /** Time one liveness probe waits for an answer before counting as missed. */
+  const probeDeadlineMs = resolveProbeDeadline(process.env)
+  /** Consecutive missed probes that restart the Host; `0` reports the stall without restarting it. */
+  const stallProbes = resolveStallProbes(process.env)
+  /** Restarts one application process may perform for stalls; further stalls are reported instead. */
+  const stallRecoveries = resolveStallRecoveries(process.env)
+  /** Whether this application is on its way out; read through a call so long async work never narrows it away. */
+  const quitRequested = (): boolean => quitting || shuttingDown
+  /** The single liveness timer of the current Host, cleared and replaced with every readiness. */
+  let livenessTimer: ReturnType<typeof setInterval> | undefined
+  /** Stall restarts already performed in this application process, across Host generations. */
+  let stallRestarts = 0
+  /** Set while a stall restart is in flight, so overlapping probes cannot start a second one. */
+  let recoveringFromStall = false
+  /** Disarm the liveness timer, if any; safe when none is armed. */
+  const stopLivenessWatch = (): void => {
+    if (livenessTimer === undefined) return
+    clearInterval(livenessTimer)
+    livenessTimer = undefined
+  }
+  /**
+   * Ask the running Host whether its event loop still answers. A plugin blocked in a synchronous loop leaves the
+   * request unanswered while the process stays alive, so nothing else in the shell notices: the window keeps
+   * rendering and boot IPC requests simply never settle. The first missed probe writes a crash report; the
+   * configured threshold then replaces the Host, which is the only recovery available from outside a wedged event
+   * loop. Work the stalled Host held is lost by that restart.
+   */
+  const startLivenessWatch = (): void => {
+    stopLivenessWatch()
+    if (livenessIntervalMs === 0) return
+    // The delay the last answered probe reported. A stall that follows it is described by that measurement,
+    // which is the difference between a blocked loop and a slow request.
+    let lastDelay: DesktopEventLoopDelay | undefined
+    const timer = setInterval(() => {
+      const host = backend.host
+      if (host === undefined || quitting || shuttingDown || recoveringFromStall) {
+        if (host !== undefined) return
+        clearInterval(timer)
+        if (livenessTimer === timer) livenessTimer = undefined
+        return
+      }
+      void host.probe(probeDeadlineMs).then((delay) => {
+        if (delay !== undefined) { missedProbes = 0; lastDelay = delay; return }
+        missedProbes += 1
+        // One report per episode: later missed probes add nothing the first did not say.
+        if (missedProbes === 1) {
+          void persistCrashReport(new Error(
+            `desktop liveness: the Host did not answer a probe within ${String(probeDeadlineMs)} ms after`
+            + ` reaching readiness; a plugin may be holding its event loop. ${describeDelay(lastDelay)}`,
+          ), 'host').catch((failure: unknown) => { console.error(failure) })
+        }
+        if (stallProbes === 0 || missedProbes < stallProbes) return
+        restartStalledHost(host)
+      })
+    }, livenessIntervalMs)
+    timer.unref()
+    livenessTimer = timer
+  }
+  /**
+   * Replace a Host whose event loop stopped answering. The restart reuses the update handoff's replacement path:
+   * stop the child, start a new one, and reload the page against its new URL. A Host that keeps stalling is
+   * reported instead of restarted forever.
+   * @param stalled - The Host instance the probe failed against.
+   */
+  const restartStalledHost = (stalled: DesktopBackendHost): void => {
+    const host = backend.host
+    if (recoveringFromStall || host !== stalled || quitRequested()) return
+    if (stallRestarts >= stallRecoveries) {
+      if (missedProbes !== stallProbes) return
+      void ordinaryMessageBox({
+        type: 'error',
+        title: locale.messages.stallNotRecoveredTitle,
+        message: formatDesktopMessage(locale.messages.stallNotRecovered, {
+          probes: String(missedProbes), recoveries: String(stallRecoveries),
+        }),
+        buttons: [locale.messages.updateAcknowledge],
+        cancelId: 0,
+      }).catch((error: unknown) => { console.error(error) })
+      return
+    }
+    recoveringFromStall = true
+    stallRestarts += 1
+    missedProbes = 0
+    console.warn(`dsh desktop: restarting a Host that missed ${String(stallProbes)} liveness probes`)
+    updateJournal?.action('host-stall-restart')
+    const recovery = (async () => {
+      // Boot admission closes first so renderers cannot request injections from a Host about to be replaced.
+      await sweepBootLeases()
+      await backend.stop()
+      await backend.start(prepareHostEnvironment)
+      // Read through a call: a quit that landed during the restart must not be narrowed away here.
+      if (quitRequested()) return
+      navigation = undefined
+      await navigateMain(applicationUrl)
+      if (backend.host !== undefined) updateJournal?.action('workspace-ready')
+    })().catch((error: unknown) => { reportFatal(error, 'host') }).finally(() => {
+      recoveringFromStall = false
+      // The update handoff awaits this promise to know when a replacement Host settled; leaving a settled stall
+      // restart recorded would make every later update wait on a stale promise.
+      if (workspaceRecovery === recovery) workspaceRecovery = undefined
+    })
+    workspaceRecovery = recovery
+  }
+  app.on('will-quit', () => { stopLivenessWatch() })
   const backend = new DesktopBackendController((onFailure) => {
     const hostInspectPort = developmentHostInspectPort(development)
     const host = new DesktopHostProcess(resources.node, resources.dsh, activeProject,
       hostInspectPort, { ...hostEnvironment, DSH_CLIENT_VERSION: desktopClientVersion() }, onFailure,
       primaryRuntime,
-      resources, (next) => { platformView.setSession(next) })
+      resources, (next) => { platformView.setSession(next) },
+      resolveDurationMs(process.env, 'DSH_DESKTOP_HOST_READY_TIMEOUT_MS', HOST_READY_TIMEOUT_MS))
     return {
       start: async () => {
         const ready = await host.start()
@@ -583,13 +709,22 @@ async function main(): Promise<void> {
       inspectQuit: () => host.inspectQuit(),
       bootInjections: () => host.bootInjections(),
       releaseBootInjections: lease => host.releaseBootInjections(lease),
+      probe: (deadlineMs?: number) => host.probe(deadlineMs),
     }
   }, (state) => {
     if (state.phase === 'error') {
       reportFatal(state.failure, 'host')
       failBootLeases()
     } else if (!shuttingDown) backendReady = state.phase === 'ready'
-    if (state.phase === 'ready') openBootAdmission()
+    if (state.phase === 'ready') {
+      openBootAdmission()
+      missedProbes = 0
+      startLivenessWatch()
+    } else {
+      // No ready Host means nothing to watch. Leaving the interval armed would outlive the Host it describes,
+      // including through a quit that does not emit `will-quit`.
+      stopLivenessWatch()
+    }
   })
 
   const updateErrors = new WeakMap<DesktopUpdateState, Promise<void>>()
@@ -648,18 +783,61 @@ async function main(): Promise<void> {
   const reconcileBackend = (): Promise<void> => {
     startup ??= (async () => {
       await navigateMain(applicationUrl)
+      let rolledBack: number | undefined
       await backend.start(async () => {
+        rolledBack = await recoverUnstartableProfile()
         await Promise.all([manager.applyRelease(), prepareHostEnvironment()])
       })
+      // Reachability is only established here: the Host has answered with its Web URL.
+      bootJournal.markReady()
       if (backend.host !== undefined) await openInitialWindow()
       if (backend.host !== undefined) updateJournal?.action('workspace-ready')
+      if (rolledBack !== undefined) {
+        // The profile no longer loads what the person configured, so say so instead of hiding the recovery.
+        void ordinaryMessageBox({
+          type: 'warning',
+          title: locale.messages.startupRolledBackTitle,
+          message: formatDesktopMessage(locale.messages.startupRolledBack, { failures: String(rolledBack) }),
+          buttons: [locale.messages.updateAcknowledge],
+          cancelId: 0,
+        }).catch((error: unknown) => { console.error(error) })
+      }
       // The existing Web document resumes through the boot IPC response.
     })().catch((error: unknown) => {
+      // Every path that ends startup without readiness lands here, including a Host that never reported and the
+      // directory a rollback could not save. A later successful launch clears the record again.
+      if (!isQuitting()) bootJournal.recordFailure(error)
       updateJournal?.action('workspace-failed')
       reportFatal(error, 'main')
       throw error
     }).finally(() => { startup = undefined })
     return startup
+  }
+
+  /**
+   * Roll the profile back to the shipped bundle set when the previous launches of this exact composition never
+   * reached readiness, and record that this composition used its one rollback. The write happens inside profile
+   * preparation, so the failing composition is replaced before the Host loads any plugin from it.
+   * @returns The failure count of the composition that was rolled back, or undefined when no rollback ran.
+   */
+  const recoverUnstartableProfile = async (): Promise<number | undefined> => {
+    const decision = bootJournal.evaluate()
+    if (!decision.rollback) return undefined
+    let backupPath: string | undefined
+    try {
+      backupPath = await manager.disableAllPlugins()
+    } catch (error) {
+      // The profile could not be rewritten. That is a fact about this launch, not a new startup failure: report
+      // it and let startup continue so its own diagnostic explains what is wrong.
+      console.warn('dsh desktop: the unstartable profile could not be rolled back', error)
+      return undefined
+    }
+    bootJournal.recordRollback()
+    console.warn(`dsh desktop: rolled back a profile that failed to start ${String(decision.failures)} times`, {
+      profilePatchBackup: backupPath ?? null,
+    })
+    updateJournal?.action('startup-rollback')
+    return decision.failures
   }
 
   const manifest: unknown = JSON.parse(await readFile(join(app.getAppPath(), 'package.json'), 'utf8'))
@@ -1372,6 +1550,8 @@ async function main(): Promise<void> {
   const finishQuit = (): void => {
     quitting = true
     shuttingDown = true
+    // Nothing left to supervise: a probe against a closing Host would only report a stall during teardown.
+    stopLivenessWatch()
     updateJournal?.action('quit-requested')
     quitConfirmation.dispose()
     backgroundNotice?.dispose()

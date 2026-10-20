@@ -15,6 +15,7 @@ import { installDesktopUpdateTaskControl } from './update-tasks.ts'
 import { installDesktopQuitInspection } from './quit-inspection.ts'
 import { installPlatformSessionPublisher } from './platform-session.ts'
 import { installOfficeEngineResolution } from './office-engine.ts'
+import { startEventLoopDelaySampler } from './event-loop-delay.ts'
 
 async function main(): Promise<void> {
   const runtimeDir = process.argv[2] as string
@@ -125,8 +126,12 @@ async function main(): Promise<void> {
     void (async () => {
       try {
         if (stopping !== undefined || control.updateTasks === undefined) throw new Error('desktop update: Host is unavailable')
-        const active = await control.updateTasks(message.action as 'inspect' | 'lock' | 'unlock')
-        await send({ type: 'update-tasks', requestId: message.requestId, active })
+        const action = message.action as 'inspect' | 'lock' | 'unlock'
+        const active = await control.updateTasks(action)
+        // An inspection is the shell's liveness probe, so it carries the delay distribution observed up to now.
+        // `lock` and `unlock` answer the update handoff, which has no use for the measurement.
+        await send({ type: 'update-tasks', requestId: message.requestId, active,
+          ...action === 'inspect' ? { eventLoopDelay: control.updateTasks.eventLoopDelay() } : {} })
       } catch (error) {
         await send({ type: 'update-tasks', requestId: message.requestId, active: true,
           error: error instanceof Error ? error.message : String(error) })
@@ -135,7 +140,9 @@ async function main(): Promise<void> {
   })
   process.once('disconnect', () => { void stop() })
   const { ctx } = await application
-  control.updateTasks = installDesktopUpdateTaskControl(ctx)
+  // Sampling starts once the tree is up: a startup that never reaches here has its own readiness deadline.
+  const eventLoopDelay = startEventLoopDelaySampler()
+  control.updateTasks = installDesktopUpdateTaskControl(ctx, eventLoopDelay)
   control.quitInspection = installDesktopQuitInspection(ctx)
   control.bootInjections = () => {
     const clientModules = ctx.get('clientModules')

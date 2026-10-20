@@ -1,20 +1,23 @@
 import type { AccountView } from '@deepseek-ai/dsh-deepseek-account/types'
 import { WINDOWS_TITLEBAR_HEIGHT } from '../src/windows-layout.ts'
-import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
+import { afterAll, afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { IpcMainInvokeEvent } from 'electron'
 import { join } from 'node:path'
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import type { MenuItemConstructorOptions, MessageBoxOptions } from 'electron'
 import { DESKTOP_IPC, type DesktopUpdateState } from '../src/ipc.ts'
 import { MANDATORY_IPC } from '../src/mandatory-update-ipc.ts'
-import { DesktopHostFatalError, DesktopHostUncleanExitError } from '../src/host-process.ts'
+import { DesktopHostFatalError, DesktopHostUncleanExitError, type DesktopEventLoopDelay } from '../src/host-process.ts'
 import { en, zh } from '../src/locale.ts'
 import { DesktopUpdatePreparationError } from '../src/update-error.ts'
 import { writeCrashReport } from '../src/crash-report.ts'
+import { DEFAULT_BOOT_FAILURE_LIMIT, profileFingerprint, type BootFailureRecord } from '../src/boot-journal.ts'
 
 type InvokeEvent = { sender?: unknown; senderFrame: { url: string } }
 type InvokeHandler = (event: InvokeEvent, ...args: unknown[]) => unknown
+/** Absolute user-data directory the current test bound; the boot journal lives under it. */
+let bootJournalDirectory: string
 
 vi.mock('../src/web-document.ts', () => ({ authenticateWebHost: async () => 'test-cookie', serveWebDocument: vi.fn(), forwardWebRequest: vi.fn() }))
 // Report persistence has its own unit tests; here it resolves within microtasks so the fatal
@@ -27,6 +30,9 @@ vi.mock('../src/crash-report.ts', async importOriginal => ({
 
 const harness = await vi.hoisted(async () => {
   const { EventEmitter } = await import('node:events')
+  const nodeFs = await import('node:fs')
+  const nodeOs = await import('node:os')
+  const nodePath = await import('node:path')
   function deferred() {
     let resolve!: () => void
     let reject!: (error: Error) => void
@@ -134,6 +140,11 @@ const harness = await vi.hoisted(async () => {
     readonly inspectQuit = vi.fn(async () => ({ activeTasks: false, scheduledTasks: false }))
     readonly bootInjections = vi.fn(async () => ({ injections: [] as readonly unknown[], lease: 'boot-1' }))
     readonly releaseBootInjections = vi.fn(async (_lease: string) => {})
+    /** Liveness probe answer; tests set it to false to simulate a Host holding its event loop. */
+    /** Probe answer: the delay the Host reports, or undefined for a Host that did not answer in time. */
+    readonly probe = vi.fn(async (_deadlineMs?: number): Promise<DesktopEventLoopDelay | undefined> => (
+      { observedMs: 1000, samples: 1000, p50Ms: 1, p99Ms: 4, maxMs: 9 }
+    ))
     url = 'http://127.0.0.1:3080/?token=test'
     fetch = vi.fn(async () => Response.json({ hasApiKey: true, writable: true, localePreference: null }))
     readonly ready = deferred()
@@ -191,7 +202,10 @@ const harness = await vi.hoisted(async () => {
   }
   const backgroundNotice = { close: vi.fn((hide: () => void) => { hide() }), dispose: vi.fn(), markerPath: undefined as string | undefined }
   const shellDialog = { isOpen: false, focus: vi.fn() }
+  // A stable profile directory the boot journal can fingerprint; tests that assert on a composition write its files.
+  const profileDir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'dsh-main-profile-'))
   return {
+    profileDir,
     failWindow(error: Error) { windowFailure = error },
     windows, hosts, handlers, app, FakeWindow, FakeHost, powerMonitor, nativeTheme, analytics,
     trays, FakeTray, backgroundNotice, shellDialog,
@@ -319,7 +333,7 @@ vi.mock('../src/login-shell-environment.ts', async importOriginal => ({
   readDesktopLoginShellEnvironment: harness.loginShell,
 }))
 vi.mock('../src/runtime-tree.ts', () => ({ readDesktopRuntime: () => ({ release: { version: '1.0.0' } }) }))
-vi.mock('../src/paths.ts', () => ({ resolveDesktopPaths: () => ({ profile: 'desktop-test-profile' }) }))
+vi.mock('../src/paths.ts', () => ({ resolveDesktopPaths: () => ({ profile: harness.profileDir }) }))
 vi.mock('../src/project-manager.ts', () => ({
   DesktopProjectManager: class {
     readonly applyRelease = harness.applyRelease
@@ -412,6 +426,7 @@ beforeEach(() => {
   vi.useFakeTimers()
   harness.reset()
   const userData = mkdtempSync(join(tmpdir(), 'dsh-main-user-data-'))
+  bootJournalDirectory = userData
   onTestFinished(() => { rmSync(userData, { recursive: true, force: true }) })
   harness.app.getPath.mockImplementation(name => name === 'userData' ? userData : `desktop-test-${name}`)
   harness.dialog.showMessageBox.mockImplementation((options: { title?: string }) => {
@@ -430,6 +445,10 @@ beforeEach(() => {
   vi.stubEnv('DSH_DESKTOP_DEV_PROJECT_DIR', undefined)
   vi.stubEnv('DSH_DESKTOP_MANDATORY_UPDATE_CONFIG', undefined)
   vi.stubEnv('DSH_DESKTOP_UPDATE_JOURNAL_DIR', undefined)
+  vi.stubEnv('DSH_DESKTOP_HOST_LIVENESS_INTERVAL_MS', undefined)
+  vi.stubEnv('DSH_DESKTOP_HOST_PROBE_TIMEOUT_MS', undefined)
+  vi.stubEnv('DSH_DESKTOP_HOST_STALL_PROBES', undefined)
+  vi.stubEnv('DSH_DESKTOP_HOST_STALL_RECOVERIES', undefined)
   vi.stubEnv('DSH_CLIENT_VERSION', '1.2.3')
   harness.analyticsEnabled = true
 })
@@ -448,6 +467,10 @@ afterEach(async () => {
   vi.unstubAllEnvs()
   vi.unstubAllGlobals()
 })
+
+// The profile directory outlives each test on purpose — the journal fingerprints one stable composition — so the
+// file's single copy is removed once the whole spec finishes rather than after every case.
+afterAll(() => { rmSync(harness.profileDir, { recursive: true, force: true }) })
 
 describe('desktop main startup', () => {
   it.each([true, false])('selects the package manager before Host startup (packaged=%s)', async (packaged) => {
@@ -2498,6 +2521,255 @@ describe('desktop main startup', () => {
     expect(harness.windows[0]!.urls).toEqual(['dsh-app://app/'])
   })
 
+  it('rolls the profile back once a launch streak never reached readiness, then reports it', async () => {
+    const profileDir = harness.profileDir
+    writeFileSync(join(profileDir, 'cordis.patch.yml'), 'patches: []\n')
+    onTestFinished(() => { rmSync(join(profileDir, 'cordis.patch.yml'), { force: true }) })
+    writeFileSync(join(bootJournalDirectory, 'boot-failures.json'), JSON.stringify({
+      version: 1,
+      fingerprint: profileFingerprint(profileDir),
+      failures: DEFAULT_BOOT_FAILURE_LIMIT,
+      kind: 'composition',
+      firstFailureAt: '2026-10-20T00:00:00.000Z',
+      lastFailureAt: '2026-10-20T00:01:00.000Z',
+      rollbackApplied: false,
+    }))
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    expect(harness.disableAllPlugins).toHaveBeenCalledOnce()
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    harness.hosts[0]!.ready.resolve()
+    await vi.waitFor(() => {
+      expect(harness.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ title: en.startupRolledBackTitle }))
+    })
+    const options = harness.dialog.showMessageBox.mock.calls.at(-1)![0] as MessageBoxOptions
+    expect(options.title).toBe(en.startupRolledBackTitle)
+    expect(options.message).toContain(String(DEFAULT_BOOT_FAILURE_LIMIT))
+    // The rollback latch is consumed: once the recovered profile reaches readiness the record is cleared, so a
+    // later breakdown starts a fresh streak instead of inheriting this one.
+    await vi.waitFor(() => { expect(existsSync(join(bootJournalDirectory, 'boot-failures.json'))).toBe(false) })
+  })
+
+  it('clears the boot failure record once a launch reaches readiness', async () => {
+    const profileDir = harness.profileDir
+    writeFileSync(join(profileDir, 'cordis.patch.yml'), 'patches: []\n')
+    onTestFinished(() => { rmSync(join(profileDir, 'cordis.patch.yml'), { force: true }) })
+    writeFileSync(join(bootJournalDirectory, 'boot-failures.json'), JSON.stringify({
+      version: 1,
+      fingerprint: profileFingerprint(profileDir),
+      failures: 1,
+      kind: 'composition',
+      firstFailureAt: '2026-10-20T00:00:00.000Z',
+      lastFailureAt: '2026-10-20T00:01:00.000Z',
+      rollbackApplied: false,
+    }))
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    harness.hosts[0]!.ready.resolve()
+    await harness.navigated.promise
+    await vi.waitFor(() => { expect(existsSync(join(bootJournalDirectory, 'boot-failures.json'))).toBe(false) })
+  })
+
+  it('records a failure when startup never reaches readiness', async () => {
+    const profileDir = harness.profileDir
+    writeFileSync(join(profileDir, 'cordis.patch.yml'), 'patches: []\n')
+    onTestFinished(() => { rmSync(join(profileDir, 'cordis.patch.yml'), { force: true }) })
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    harness.hosts[0]!.ready.reject(new Error('plugin did not activate'))
+    // The backend awaits child cleanup before publishing the failure, so the exit settles first.
+    await harness.hosts[0]!.stopping.promise
+    harness.hosts[0]!.exited.resolve()
+    await harness.dialogShown.promise
+    // The shell records the failure on the rejection path; the dialog is published before that path settles.
+    await vi.waitFor(() => { expect(existsSync(join(bootJournalDirectory, 'boot-failures.json'))).toBe(true) })
+    const record = JSON.parse(readFileSync(join(bootJournalDirectory, 'boot-failures.json'), 'utf8')) as BootFailureRecord
+    expect(record).toMatchObject({ version: 1, failures: 1, kind: 'composition', rollbackApplied: false })
+    expect(record.fingerprint).toBe(profileFingerprint(profileDir))
+  })
+
+  it('leaves a ready Host unprobed when the interval is explicitly zero', async () => {
+    vi.stubEnv('DSH_DESKTOP_HOST_LIVENESS_INTERVAL_MS', '0')
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    harness.hosts[0]!.ready.resolve()
+    await harness.navigated.promise
+    await vi.advanceTimersByTimeAsync(600_000)
+    // Probing is on by default; zero is the escape hatch for deployments that must never lose a long task.
+    expect(harness.hosts[0]!.probe).not.toHaveBeenCalled()
+  })
+
+  it('describes a stall with the event-loop delay the last answered probe measured', async () => {
+    vi.stubEnv('DSH_DESKTOP_HOST_LIVENESS_INTERVAL_MS', '1000')
+    vi.stubEnv('DSH_DESKTOP_HOST_STALL_PROBES', '0')
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const host = harness.hosts[0]!
+    host.ready.resolve()
+    await harness.navigated.promise
+    // The Host answers once with a measurement, then stops answering: the report describes the measured window.
+    host.probe.mockResolvedValueOnce({ observedMs: 30_000, samples: 30_000, p50Ms: 1, p99Ms: 240, maxMs: 4800 })
+    await vi.advanceTimersByTimeAsync(1000)
+    host.probe.mockResolvedValue(undefined)
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => { expect(writeCrashReport).toHaveBeenCalledOnce() })
+    const [, report] = vi.mocked(writeCrashReport).mock.calls[0]!
+    const message = (report.error as Error).message
+    expect(message).toContain('did not answer a probe')
+    // The measurement is what separates a blocked loop from a slow request.
+    expect(message).toContain('blocked for up to 4800 ms')
+    expect(message).toContain('p99 240 ms')
+    expect(message).toContain('over 30000 ms')
+  })
+
+  it('says so when a stalled Host reported no delay measurement', async () => {
+    vi.stubEnv('DSH_DESKTOP_HOST_LIVENESS_INTERVAL_MS', '1000')
+    vi.stubEnv('DSH_DESKTOP_HOST_STALL_PROBES', '0')
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const host = harness.hosts[0]!
+    host.ready.resolve()
+    await harness.navigated.promise
+    // Every probe times out, so no measurement ever reached the shell.
+    host.probe.mockResolvedValue(undefined)
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => { expect(writeCrashReport).toHaveBeenCalledOnce() })
+    const [, report] = vi.mocked(writeCrashReport).mock.calls[0]!
+    expect((report.error as Error).message).toContain('No event-loop delay measurement was available')
+  })
+
+  it('reports a stalled Host once and keeps the process alive', async () => {
+    vi.stubEnv('DSH_DESKTOP_HOST_LIVENESS_INTERVAL_MS', '1000')
+    // Detection only: this case pins the report, not the replacement.
+    vi.stubEnv('DSH_DESKTOP_HOST_STALL_PROBES', '0')
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    harness.hosts[0]!.ready.resolve()
+    await harness.navigated.promise
+    harness.hosts[0]!.probe.mockResolvedValue(undefined)
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => { expect(writeCrashReport).toHaveBeenCalledOnce() })
+    const [directory, report] = vi.mocked(writeCrashReport).mock.calls[0]!
+    expect(directory).toBe('desktop-test-logs')
+    expect(report.source).toBe('host')
+    expect(report.phase).toBe('running')
+    expect((report.error as Error).message).toContain('did not answer a probe')
+    // A stalled Host is still a live process: the report does not turn into a fatal exit or a plugin rewrite.
+    expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
+    expect(harness.disableAllPlugins).not.toHaveBeenCalled()
+    // Later missed probes of the same episode add no further reports.
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(writeCrashReport).toHaveBeenCalledOnce()
+  })
+
+  it('clears the missed-probe episode once the Host answers again', async () => {
+    vi.stubEnv('DSH_DESKTOP_HOST_LIVENESS_INTERVAL_MS', '1000')
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    harness.hosts[0]!.ready.resolve()
+    await harness.navigated.promise
+    const probe = harness.hosts[0]!.probe
+    probe.mockResolvedValueOnce(undefined)
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => { expect(writeCrashReport).toHaveBeenCalledOnce() })
+    // The next answered probe ends the episode, so a later stall is reported again.
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(probe.mock.calls.length).toBeGreaterThanOrEqual(2)
+    probe.mockResolvedValue(undefined)
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => { expect(writeCrashReport).toHaveBeenCalledTimes(2) })
+  })
+
+  it('restarts a Host that misses the configured number of probes', async () => {
+    vi.stubEnv('DSH_DESKTOP_HOST_LIVENESS_INTERVAL_MS', '1000')
+    vi.stubEnv('DSH_DESKTOP_HOST_STALL_PROBES', '3')
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const first = harness.hosts[0]!
+    first.ready.resolve()
+    await harness.navigated.promise
+    first.probe.mockResolvedValue(undefined)
+    const restarted = harness.nextHostStart()
+    const navigation = harness.nextNavigation()
+    await vi.advanceTimersByTimeAsync(3000)
+    // The restart waits for the stalled child to exit, which its stop acknowledgement settles.
+    await harness.hosts[0]!.stopping.promise
+    first.exited.resolve()
+    // Three consecutive missed probes replace the Host instead of only reporting it.
+    await restarted
+    expect(harness.hosts).toHaveLength(2)
+    expect(first.stop).toHaveBeenCalled()
+    harness.hosts[1]!.ready.resolve()
+    await navigation
+    expect(harness.windows[0]!.urls).toEqual(['dsh-app://app/', 'dsh-app://app/'])
+  }, 20_000)
+
+  it('never restarts a Host below the configured probe threshold', async () => {
+    vi.stubEnv('DSH_DESKTOP_HOST_LIVENESS_INTERVAL_MS', '1000')
+    vi.stubEnv('DSH_DESKTOP_HOST_STALL_PROBES', '5')
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const host = harness.hosts[0]!
+    host.ready.resolve()
+    await harness.navigated.promise
+    host.probe.mockResolvedValue(undefined)
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(harness.hosts).toHaveLength(1)
+    expect(host.stop).not.toHaveBeenCalled()
+    // The report still lands at the first miss, so a slow stall is visible before the threshold.
+    expect(writeCrashReport).toHaveBeenCalledOnce()
+  }, 20_000)
+
+  it('reports rather than restarting again once the restart budget is spent', async () => {
+    vi.stubEnv('DSH_DESKTOP_HOST_LIVENESS_INTERVAL_MS', '1000')
+    vi.stubEnv('DSH_DESKTOP_HOST_STALL_PROBES', '1')
+    vi.stubEnv('DSH_DESKTOP_HOST_STALL_RECOVERIES', '1')
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const first = harness.hosts[0]!
+    first.ready.resolve()
+    await harness.navigated.promise
+    first.probe.mockResolvedValue(undefined)
+    const restarted = harness.nextHostStart()
+    await vi.advanceTimersByTimeAsync(1000)
+    await harness.hosts[0]!.stopping.promise
+    first.exited.resolve()
+    await restarted
+    harness.hosts[1]!.ready.resolve()
+    await vi.waitFor(() => { expect(harness.hosts).toHaveLength(2) })
+    harness.dialog.showMessageBox.mockClear()
+    const second = harness.hosts[1]!
+    second.probe.mockResolvedValue(undefined)
+    await vi.advanceTimersByTimeAsync(1000)
+    // The single permitted recovery is spent: the second stall reports instead of restarting forever.
+    expect(harness.hosts).toHaveLength(2)
+    const expected = en.stallNotRecovered.replace('{probes}', '1').replace('{recoveries}', '1')
+    await vi.waitFor(() => {
+      expect(harness.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ message: expected }))
+    })
+  }, 20_000)
+
   it('creates the Host only after the login-shell read and ends the read on quit', async () => {
     let finishRead!: () => void
     const read = new Promise<void>((resolve) => { finishRead = resolve })
@@ -2541,7 +2813,7 @@ describe('desktop main startup', () => {
       node: process.execPath,
       runtime: join(harness.app.getAppPath(), 'dsh'),
       primaryRuntime: join('desktop-test-resources', 'runtime', 'primary-runtime'),
-      profile: 'desktop-test-profile',
+      profile: harness.profileDir,
     })
     expect(harness.hosts[0]!.environment).not.toBe(process.env)
     expect(harness.hosts[0]!.environment?.DSH_CLIENT_VERSION).toBe('1.2.3')
@@ -2562,7 +2834,7 @@ describe('desktop main startup', () => {
     await harness.hostStarted.promise
     const project = join(harness.app.getAppPath(), '.desktop-build', 'development', 'project')
     expect(harness.hosts[0]).toMatchObject({ node: process.execPath, runtime: project,
-      primaryRuntime: 'test-primary-runtime', profile: 'desktop-test-profile' })
+      primaryRuntime: 'test-primary-runtime', profile: harness.profileDir })
     expect(harness.applyRelease).toHaveBeenCalledOnce()
     harness.hosts[0]!.ready.resolve()
     await harness.navigated.promise

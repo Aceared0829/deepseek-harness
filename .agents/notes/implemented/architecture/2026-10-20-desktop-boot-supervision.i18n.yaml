@@ -1,0 +1,37 @@
+# Bilingual-pair consistency record for 2026-10-20-desktop-boot-supervision.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-10-20-desktop-boot-supervision.md
+/agent-note-bound-host-startup-and-roll-back-a-profile-that-cannot-start:
+  en: 3cbae9b6c9cd6e93
+  zh: 580124cc276f43f8
+/agent-note-bound-host-startup-and-roll-back-a-profile-that-cannot-start/problem:
+  en: 8e07803f5d0a451d
+  zh: 6d0fb3c8abe22983
+/agent-note-bound-host-startup-and-roll-back-a-profile-that-cannot-start/decision:
+  en: e4aad1dffedf40cf
+  zh: ec3f773dc4cdebd6
+/agent-note-bound-host-startup-and-roll-back-a-profile-that-cannot-start/decision/a-readiness-deadline:
+  en: b95bb3b55081c4dc
+  zh: b7e7ca19747c4707
+/agent-note-bound-host-startup-and-roll-back-a-profile-that-cannot-start/decision/a-launch-streak-the-shell-owns:
+  en: 52354b06ccc59cd6
+  zh: ca63eec69c2c70c8
+/agent-note-bound-host-startup-and-roll-back-a-profile-that-cannot-start/decision/one-automatic-rollback:
+  en: 4dc676d284541b25
+  zh: f9f091a9865658f9
+/agent-note-bound-host-startup-and-roll-back-a-profile-that-cannot-start/decision/a-liveness-probe-that-can-replace-the-host:
+  en: 97621c1843e97eed
+  zh: b0a657cd1fa29680
+/agent-note-bound-host-startup-and-roll-back-a-profile-that-cannot-start/decision/measuring-what-a-stall-means:
+  en: ee59ac1342ea7130
+  zh: b5262a0664ef70dc
+/agent-note-bound-host-startup-and-roll-back-a-profile-that-cannot-start/alternatives-considered:
+  en: 767ae46eced8adda
+  zh: 3eacdbfb8f009b50
+/agent-note-bound-host-startup-and-roll-back-a-profile-that-cannot-start/consequences:
+  en: 17d96a1243c6befc
+  zh: 4ca3447a1aa08c93
+/agent-note-bound-host-startup-and-roll-back-a-profile-that-cannot-start/testing:
+  en: 39d30bb2888f3151
+  zh: 1c177d28ace34853
