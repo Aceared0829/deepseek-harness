@@ -12,6 +12,31 @@ const launcher = fileURLToPath(new URL('../scripts/upload-with-credentials.ps1',
 const roots: string[] = []
 const quote = (value: string): string => `'${value.replaceAll("'", "''")}'`
 
+/**
+ * Run the launcher script in a PowerShell host. The script requires only 5.1, so Windows PowerShell is enough;
+ * `pwsh` is tried first because it is what the release tooling normally uses, and a host that is not installed
+ * reports `ENOENT` rather than a number, which is why the fallback happens here instead of in the caller.
+ * @param script - Script text to run through `-EncodedCommand`.
+ * @param environment - Child environment.
+ * @returns Captured stdout and stderr of the host process.
+ * @throws The child-process failure of the last host tried.
+ */
+async function runPowerShell(script: string, environment: NodeJS.ProcessEnv) {
+  const encoded = Buffer.from(script, 'utf16le').toString('base64')
+  const windowsPowerShell = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  let lastError: unknown
+  for (const host of ['pwsh', windowsPowerShell]) {
+    try {
+      return await execute(host, ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { env: environment, timeout: 30_000 })
+    } catch (error) {
+      // A missing host is the only failure worth another attempt; a failing script is the test's own result.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      lastError = error
+    }
+  }
+  throw lastError
+}
+
 async function check(mode: 'valid' | 'plaintext' | 'blank' | 'missing' | 'upload' | 'upload-latest' | 'upload-failure', deployment = 'production') {
   const root = await mkdtemp(join(tmpdir(), 'desktop-credentials-'))
   roots.push(root)
@@ -49,6 +74,9 @@ async function check(mode: 'valid' | 'plaintext' | 'blank' | 'missing' | 'upload
   `
   const script = `
     $ErrorActionPreference = 'Stop'
+    # Windows PowerShell 5.1 serializes module-load progress as CLIXML on stderr, which would contaminate the
+    # captured output this test compares against its expectation.
+    $ProgressPreference = 'SilentlyContinue'
     ${setup}
     $env:DOWNLOAD_PROD_COS_SECRET_ID = 'parent-sentinel'
     $env:DOWNLOAD_TEST_COS_SECRET_KEY = 'unrelated-test-key'
@@ -67,16 +95,23 @@ async function check(mode: 'valid' | 'plaintext' | 'blank' | 'missing' | 'upload
   const pathKey = Object.keys(env).find(name => name.toLowerCase() === 'path') ?? 'PATH'
   env[pathKey] = `${dirname(process.execPath)}${delimiter}${env[pathKey] ?? ''}`
   try {
-    const result = await execute('pwsh', [
-      '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64'),
-    ], { env, timeout: 30_000 })
+    const result = await runPowerShell(script, env)
     return { code: 0, output: result.stdout + result.stderr }
   }
   catch (error) {
-    const result = error as Error & { code: number | string; stdout: string; stderr: string; killed?: boolean }
+    const result = error as Error & { code: number | string; stdout?: string; stderr?: string; killed?: boolean }
     expect(result.killed).not.toBe(true)
-    expect(typeof result.code).toBe('number')
-    return { code: result.code, output: result.stdout + result.stderr }
+    // `error.code` is the launcher's exit status only when it is a number; a string is the errno of a host that
+    // never ran the script (ENOENT for a missing shell, EACCES for an unexecutable one), which must fail loudly
+    // rather than be read as an exit code and turned into a confusing assertion about the output.
+    if (typeof result.code !== 'number') {
+      throw new Error(
+        `the PowerShell host did not run the launcher (${result.code}): `
+        + `${result.stderr ?? ''}${result.stdout ?? ''}`.trim(),
+        { cause: error },
+      )
+    }
+    return { code: result.code, output: `${result.stdout ?? ''}${result.stderr ?? ''}` }
   }
 }
 
