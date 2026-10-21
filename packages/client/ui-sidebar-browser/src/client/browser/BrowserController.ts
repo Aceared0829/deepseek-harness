@@ -26,6 +26,8 @@ export interface BrowserControllerOptions {
   readonly actions: BoundActions<BrowserStore>
   readonly createPage: BrowserPageFactory
   readonly openTab: (url: string) => void
+  /** Deployment's address for a tab that carries no URL and has no saved page; empty opens nothing. */
+  readonly homeUrl: string
 }
 
 /** Owns input validation and page lifetime without inspecting the carrier type. */
@@ -94,7 +96,8 @@ export class BrowserController implements HostObservable<BrowserControllerState>
   start(initialUrl: string | undefined): void {
     if (this.started || this.disposed) return
     this.started = true
-    if (initialUrl !== undefined) this.loadUrl(initialUrl)
+    if (initialUrl !== undefined) { this.loadUrl(initialUrl); return }
+    if (this.checkpoint === undefined && this.options.homeUrl !== '') this.loadUrl(this.options.homeUrl)
   }
 
   /** Load the saved address only after an explicit restore action. */
@@ -209,10 +212,11 @@ export interface BrowserInjected {
  * @param actions - persisted view-state writer.
  * @param createPage - composition-selected provider.
  * @param isTabOpen - authoritative layout membership, independent of mounted bodies and plugin lifetime.
+ * @param homeUrl - deployment's address for a tab that carries no URL and has no saved page.
  * @returns tab callbacks.
  */
 export function createBrowserControllers(actions: BoundActions<BrowserStore>, createPage: BrowserPageFactory,
-  isTabOpen: (tabId: TabId) => boolean): BrowserInjected {
+  isTabOpen: (tabId: TabId) => boolean, homeUrl: string): BrowserInjected {
   let currentActions = actions
   const controllers = new Map<TabId, {
     readonly signal: AbortSignal
@@ -231,7 +235,7 @@ export function createBrowserControllers(actions: BoundActions<BrowserStore>, cr
           held.signal.removeEventListener('abort', held.forget)
           void held.controller.dispose()
         }
-        const created = new BrowserController({ ...request, actions: currentActions, createPage })
+        const created = new BrowserController({ ...request, actions: currentActions, createPage, homeUrl })
         const forget = (): void => {
           controllers.delete(tabId)
           // Plugin unload also aborts occurrences; only layout removal deletes saved navigation.

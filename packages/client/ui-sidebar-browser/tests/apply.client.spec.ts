@@ -118,6 +118,28 @@ describe('ui-sidebar-browser apply', () => {
     }
   })
 
+  it('opens the injected Host default address in a new tab', async () => {
+    vi.stubGlobal('__DSH_SIDEBAR_BROWSER_CONFIG__', { homeUrl: 'https://home.example/start' })
+    const h = await boot()
+    const injectFace = h.registered.find(entry => entry.name === 'sidebar.right.pane.tab')!.inject as
+      (sessionId: string, actions: Parameters<BrowserInjected['rebind']>[0]) => BrowserInjected
+    const controller = injectFace('session', createBrowserStore().create('apply-home').actions)
+    const host = document.createElement('div')
+    host.id = 'browser-apply-home'
+    document.body.append(host)
+    const signal = new AbortController()
+    const tabId = 'home-tab' as TabId
+    try {
+      controller.mount({ tabId, signal: signal.signal, viewportId: host.id, applicationOrigin: 'https://dsh.example',
+        initial: undefined, initialUrl: undefined, openTab: vi.fn() })
+      expect(host.querySelector('iframe')?.getAttribute('src')).toBe('https://home.example/start')
+    } finally {
+      signal.abort()
+      await h.fiber.dispose()
+      host.remove()
+    }
+  })
+
   it('registers a multi-instance builtin and its body and title', async () => {
     const { tabs, registered, dictionaries } = await boot()
     const definition = tabs.get(BROWSER_KIND)

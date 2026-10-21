@@ -18,6 +18,7 @@ import type { BrowserPageFactory } from './browser/BrowserPage.ts'
 import { BROWSER_ID, browserDefinition } from './definition.tsx'
 import { en, zh } from './locales.ts'
 import { createBrowserStore } from './browser/store.ts'
+import { BROWSER_CONFIG_GLOBAL, Config } from '../config.ts'
 
 export type { BrowserBodyProps } from './view/BrowserBody.tsx'
 export type { BrowserControllerState, BrowserInjected, BrowserMountRequest } from './browser/BrowserController.ts'
@@ -43,6 +44,8 @@ export const inject = ['slots', 'locale', 'sidebarRight', 'sidebarRightTabs']
 export function apply(ctx: Context): void {
   const namespace = 'sidebarBrowser'
   const t = ctx.locale.bind(namespace)
+  // A page served without Host injections keeps the schema defaults.
+  const config = Config((globalThis as { [BROWSER_CONFIG_GLOBAL]?: unknown })[BROWSER_CONFIG_GLOBAL] ?? {})
   ctx.inject(['shortcuts'], (ctx) => {
     ctx.effect(() => ctx.shortcuts.register({
       id: 'browser.new' as ShortcutCommandId, label: () => t('guide.title'), aliases: ['browser', 'new browser tab'],
@@ -88,7 +91,7 @@ export function apply(ctx: Context): void {
           return existing
         }
         const controller = createBrowserControllers(actions, factory(sessionId), tabId =>
-          openTabs.getSnapshot().some(tab => tab.sessionId === sessionId && tab.tabId === tabId))
+          openTabs.getSnapshot().some(tab => tab.sessionId === sessionId && tab.tabId === tabId), config.homeUrl)
         controllers.set(sessionId, controller)
         return controller
       },

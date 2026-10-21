@@ -33,14 +33,22 @@ Choose Browser for a Web page that should remain beside the current Session. Cho
 
 ### Minimal configuration
 
-The package has no plugin configuration. A Web profile enables the shipped entry through its profile patch:
+A Web profile enables the shipped entry through its profile patch:
 
 ```yaml
 - id: ui-sidebar-browser
   disabled: false
 ```
 
-Client plugins can open a tab through `ctx.sidebarRight.openTab('browser', { params: { url } })`. The optional URL passes the same validation as address-bar input before navigation.
+`homeUrl` defaults to `https://www.google.com` and is the address a new Browser tab opens when it carries no `url` parameter and has no saved page. A restart therefore still shows the saved page's title and URL, and only Restore or Reload opens it. Set an empty string to keep the start placeholder, or any other HTTP(S) address to change the default:
+
+```yaml
+- id: ui-sidebar-browser
+  config:
+    homeUrl: https://example.com/start
+```
+
+Client plugins can open a tab through `ctx.sidebarRight.openTab('browser', { params: { url } })`. The optional URL passes the same validation as address-bar input before navigation and takes precedence over `homeUrl`.
 
 The `browser.new` command opens a separate Browser page in the focused dock pane, replacing a guide and retaining existing content pages. From the conversation or a floating content page, it uses the active dock pane. Desktop defaults to Cmd+T on macOS and Ctrl+T on Windows; Windows and macOS Web use the [shortcut service’s platform defaults](../shortcuts/README.md); Linux Web leaves the command unbound. The guide button uses a blue globe and displays the effective shortcut inline without a duplicate tooltip.
 
