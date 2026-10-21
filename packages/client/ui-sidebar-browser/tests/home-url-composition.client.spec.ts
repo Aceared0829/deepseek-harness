@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-/** The Host's config row reaches the browser half through the served index and opens the tab. */
+/** The served index's config row reaches the browser half and opens the tab. */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { renderIndexInjections } from '@deepseek-ai/dsh-host-webserver'
@@ -10,7 +10,7 @@ import { SidebarRightTabRegistry } from '@deepseek-ai/dsh-client-ui-sidebar-righ
 import type { BrowserInjected } from '../src/client/browser/BrowserController.ts'
 import { createBrowserStore } from '../src/client/browser/store.ts'
 import { apply as applyClient, inject } from '../src/client/index.ts'
-import { Config, apply as applyHost } from '../src/index.ts'
+import { BROWSER_CONFIG_GLOBAL, Config } from '../src/config.ts'
 
 const contexts: Context[] = []
 
@@ -57,19 +57,18 @@ async function bootClient() {
   return { fiber, face }
 }
 
-async function serveConfig(configured: Parameters<typeof Config>[0]): Promise<void> {
-  const rows: IndexInjection[] = []
-  const ctx = new Context()
-  contexts.push(ctx)
-  const fiber = ctx.plugin({ Config, apply: applyHost }, Config(configured))
-  await fiber.await()
-  ctx.emit('webserver/index-inject', rows)
-  adoptIndexGlobal(renderIndexInjections('<html><head></head><body></body></html>', rows), '__DSH_SIDEBAR_BROWSER_CONFIG__')
+/**
+ * Publish the config row the Host entry contributes, in the shape the served
+ * index renders: the Host spec pins that row, and this spec starts from it.
+ */
+function serveConfig(configured: Parameters<typeof Config>[0]): void {
+  const rows: IndexInjection[] = [{ kind: 'global', name: BROWSER_CONFIG_GLOBAL, value: Config(configured) }]
+  adoptIndexGlobal(renderIndexInjections('<html><head></head><body></body></html>', rows), BROWSER_CONFIG_GLOBAL)
 }
 
 describe('Sidebar Browser default address through the served index', () => {
   it('opens the configured home address in a new tab', async () => {
-    await serveConfig({ homeUrl: 'https://example.test/start' })
+    serveConfig({ homeUrl: 'https://example.test/start' })
     const { face } = await bootClient()
     const host = document.createElement('div')
     host.id = 'home-url-composition'
@@ -87,7 +86,7 @@ describe('Sidebar Browser default address through the served index', () => {
   })
 
   it('opens Google by default when the Host sets no address', async () => {
-    await serveConfig({})
+    serveConfig({})
     const { face } = await bootClient()
     const host = document.createElement('div')
     host.id = 'home-url-default'
@@ -106,7 +105,7 @@ describe('Sidebar Browser default address through the served index', () => {
   })
 
   it('keeps the start placeholder when the Host sets an empty address', async () => {
-    await serveConfig({ homeUrl: '' })
+    serveConfig({ homeUrl: '' })
     const { face } = await bootClient()
     const host = document.createElement('div')
     host.id = 'home-url-empty'
