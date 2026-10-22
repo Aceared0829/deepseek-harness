@@ -13,14 +13,21 @@ Carry a DSH profile from one device to another: plugin roster, locked versions, 
 | `pnpm-workspace.yaml` | pnpm resolution policy (`hoisted`), packages allowed to run builds, `minimumReleaseAgeExclude`. |
 | `restore.ps1` | One-command restore script. |
 
-## About the two local private packages
+## About the `link:` dependencies
 
-`package.json` links two `link:` dependencies that are **not published packages**, so a new device has no such directories and a plain install fails:
+`package.json` links seven dependencies that are **not published packages**, so a new device has no such directories and a plain install fails. Five live under `<workspace>` (the `default-workspace` root); two live inside the DSH repository:
 
-- `@local/dsh-desktop-extras` pointing at `<workspace>/bundles/desktop-extras`
-- `@dsh-pet/bridge` pointing at `<workspace>/pet-src/integrations/dsh-pet-bridge`
+| Package | Expected location |
+| --- | --- |
+| `@local/dsh-desktop-extras` | `<workspace>/bundles/desktop-extras` |
+| `@dsh-pet/bridge` | `<workspace>/pet-src/integrations/dsh-pet-bridge` |
+| `@dsh-pet/lifecycle` | `<workspace>/dsh-kit/plugins/dsh-pet-lifecycle` |
+| `dsh-connect-grok` | `<workspace>/dsh-connect-grok` |
+| `dsh-connect-workbuddy` | `<workspace>/bundles/dsh-connect-workbuddy` |
+| `dsh-harness-eval` | `<repo>/plugins/harness-eval` |
+| `@deepseek-ai/dsh-subagent-claude-code` | `<repo>/packages/subagent/subagent-claude-code` |
 
-`restore.ps1` detects this: it links the directory when it exists, and otherwise tells you and offers two choices (skip, or place the package yourself). **This is not a defect in the snapshot; the two packages only ever existed on the original machine.**
+`restore.ps1` detects this: it links each directory to its real path on this device when it exists, and otherwise tells you and drops that package from the roster. **This is not a defect in the snapshot; those packages only ever existed on the original machine.**
 
 ## Restoring
 
@@ -47,7 +54,8 @@ The script:
 | --- | --- |
 | `-ProfileDir <path>` | Target profile directory; defaults to `$env:DSH_PROFILE_DIR` |
 | `-WorkspaceDir <path>` | Workspace root holding the private packages. When omitted, the script searches upwards for `default-workspace` and then falls back to `~/Documents/deepseek-harness/default-workspace` |
-| `-SkipLocalPackages` | Force both local private packages to be skipped |
+| `-RepoDir <path>` | DSH repository root, for links inside `packages/` and `plugins/`. When omitted, the script takes the directory two levels above itself |
+| `-SkipLocalPackages` | Force every `link:` private package to be skipped |
 | `-ForceUnfrozen` | Do not pass `--frozen-lockfile` |
 
 ### Exit codes

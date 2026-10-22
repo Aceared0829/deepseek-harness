@@ -13,14 +13,21 @@
 | `pnpm-workspace.yaml` | pnpm 解析策略（`hoisted`）、允许构建的包、`minimumReleaseAgeExclude`。 |
 | `restore.ps1` | 一键还原脚本。 |
 
-## 关于两个本地私有包
+## 关于 `link:` 依赖
 
-`package.json` 里有两个 `link:` 依赖，它们**不是 npm 上的包**，新设备上没有这两个目录，直接安装会失败：
+`package.json` 里有 7 个 `link:` 依赖，它们**不是 npm 上的包**，新设备上没有这些目录，直接安装会失败。其中 5 个在 `<workspace>`（`default-workspace` 根）下，2 个在 DSH 仓库内：
 
-- `@local/dsh-desktop-extras` → `<workspace>/bundles/desktop-extras`
-- `@dsh-pet/bridge` → `<workspace>/pet-src/integrations/dsh-pet-bridge`
+| 包 | 期望位置 |
+| --- | --- |
+| `@local/dsh-desktop-extras` | `<workspace>/bundles/desktop-extras` |
+| `@dsh-pet/bridge` | `<workspace>/pet-src/integrations/dsh-pet-bridge` |
+| `@dsh-pet/lifecycle` | `<workspace>/dsh-kit/plugins/dsh-pet-lifecycle` |
+| `dsh-connect-grok` | `<workspace>/dsh-connect-grok` |
+| `dsh-connect-workbuddy` | `<workspace>/bundles/dsh-connect-workbuddy` |
+| `dsh-harness-eval` | `<repo>/plugins/harness-eval` |
+| `@deepseek-ai/dsh-subagent-claude-code` | `<repo>/packages/subagent/subagent-claude-code` |
 
-`restore.ps1` 会自动检测：目录存在就正常 link，不存在就提示你，并给出两个选项（跳过 / 手动放入）。**这不是快照本身的问题，是这两个包本来就只存在于本机。**
+`restore.ps1` 会自动检测：目录存在就按本机路径重新 link，不存在就提示你并从清单里移除该包。**这不是快照本身的问题，是这些包本来就只存在于本机。**
 
 ## 还原步骤
 
@@ -46,7 +53,8 @@ $profile = "$env:DSH_PROFILE_DIR"
 | --- | --- |
 | `-ProfileDir <path>` | 目标 profile 目录，默认取 `$env:DSH_PROFILE_DIR` |
 | `-WorkspaceDir <path>` | 私有包所在 workspace 根目录。不指定时自动向上查找 `default-workspace`，再兜底 `~/Documents/deepseek-harness/default-workspace` |
-| `-SkipLocalPackages` | 强制跳过两个本地私有包 |
+| `-RepoDir <path>` | DSH 仓库根目录（用于 `packages/`、`plugins/` 内的 link）。不指定时取脚本所在目录向上两级 |
+| `-SkipLocalPackages` | 强制跳过所有 `link:` 私有包 |
 | `-ForceUnfrozen` | 不使用 `--frozen-lockfile` |
 
 ### 退出码

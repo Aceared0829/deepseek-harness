@@ -5,7 +5,7 @@
 .DESCRIPTION
     - 备份现有 profile 文件
     - 写入快照的 package.json / pnpm-lock.yaml / pnpm-workspace.yaml
-    - 处理两个本地私有包（link: 依赖）
+    - 处理所有 link: 依赖（本地私有包），逐个改写为本机实际路径或移除
     - 执行 pnpm install，失败自动回滚
 
 .PARAMETER ProfileDir
@@ -14,14 +14,18 @@
 
 .PARAMETER WorkspaceDir
     本地私有包所在的 workspace 根目录（其下应有 bundles/ 与 pet-src/）。
-    默认取当前目录的父级再拼 default-workspace，可用 -WorkspaceDir 覆盖。
+    默认取当前目录向上查找的 default-workspace。
     找不到时不影响还原，只会跳过对应的私有包。
 
+.PARAMETER RepoDir
+    DSH 仓库根目录，用于仓库内的 link: 依赖（packages/、plugins/）。
+    默认取本脚本所在目录向上两级。
+
 .PARAMETER SkipLocalPackages
-    跳过两个本地私有包的 link，直接从清单里移除。
+    跳过所有本地私有包的 link，直接从清单里移除。
 
 .PARAMETER ForceUnfrozen
-    不使用 --frozen-lockfile。当清单被改写（跳过私有包）导致与 lock 不一致时，
+    不使用 --frozen-lockfile。清单被改写导致与 lock 不一致时，
     脚本会自动退化为非 frozen 模式；也可用本参数强制。
 
 .EXAMPLE
@@ -33,12 +37,20 @@
 param(
     [string]$ProfileDir = $env:DSH_PROFILE_DIR,
     [string]$WorkspaceDir,
+    [string]$RepoDir,
     [switch]$SkipLocalPackages,
     [switch]$ForceUnfrozen
 )
 
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+# 仓库根：docs/profile-snapshot/ -> 上两级。
+if (-not $RepoDir) {
+    $candidate = Split-Path (Split-Path $here -Parent) -Parent
+    if ($candidate -and (Test-Path -LiteralPath (Join-Path $candidate 'packages'))) { $RepoDir = $candidate }
+}
+if (-not $RepoDir) { $RepoDir = '' }
 
 # 未显式指定时，尝试从当前目录向上找一个含 default-workspace 的位置；
 # 找不到就留空，后续按「私有包缺失」处理。
@@ -71,6 +83,8 @@ if (-not (Test-Path -LiteralPath $ProfileDir)) {
     throw "ProfileDir 不存在：$ProfileDir"
 }
 Write-Step "目标 profile: $ProfileDir"
+Write-Host "    workspace: $(if ($WorkspaceDir) { $WorkspaceDir } else { '<未定位>' })" -ForegroundColor Gray
+Write-Host "    仓库根   : $(if ($RepoDir) { $RepoDir } else { '<未定位>' })" -ForegroundColor Gray
 
 foreach ($f in @('package.json','pnpm-lock.yaml','pnpm-workspace.yaml')) {
     if (-not (Test-Path -LiteralPath (Join-Path $here $f))) { throw "快照缺少文件：$f" }
@@ -91,37 +105,43 @@ foreach ($f in @('package.json','pnpm-lock.yaml','pnpm-workspace.yaml')) {
 }
 
 # ---------- 2. 解析本地私有包 ----------
-Write-Step "处理本地私有包"
+Write-Step "处理本地私有包（link: 依赖）"
 # 关键：只改写内存中的副本，绝不修改快照源文件，
 # 否则重复运行会把 link: 依赖永久从快照里删掉。
 $srcPkgPath = Join-Path $here 'package.json'
 $pkg = Get-Content $srcPkgPath -Raw -Encoding UTF8 | ConvertFrom-Json
 
+# base: 'workspace' = default-workspace 根；'repo' = DSH 仓库根。
+# 顺序无关；只处理确实出现在 dependencies 里的条目。
 $localPackages = [ordered]@{
-    '@local/dsh-desktop-extras' = 'bundles\desktop-extras'
-    '@dsh-pet/bridge'           = 'pet-src\integrations\dsh-pet-bridge'
+    '@local/dsh-desktop-extras'              = @{ base = 'workspace'; rel = 'bundles\desktop-extras' }
+    '@dsh-pet/bridge'                        = @{ base = 'workspace'; rel = 'pet-src\integrations\dsh-pet-bridge' }
+    '@dsh-pet/lifecycle'                     = @{ base = 'workspace'; rel = 'dsh-kit\plugins\dsh-pet-lifecycle' }
+    'dsh-connect-grok'                       = @{ base = 'workspace'; rel = 'dsh-connect-grok' }
+    'dsh-connect-workbuddy'                  = @{ base = 'workspace'; rel = 'bundles\dsh-connect-workbuddy' }
+    'dsh-harness-eval'                       = @{ base = 'repo';      rel = 'plugins\harness-eval' }
+    '@deepseek-ai/dsh-subagent-claude-code'  = @{ base = 'repo';      rel = 'packages\subagent\subagent-claude-code' }
 }
 
 $missing = @()
+$rewritten = 0
 foreach ($name in $localPackages.Keys) {
     if (-not ($pkg.dependencies.PSObject.Properties.Name -contains $name)) { continue }
-    $rel = $localPackages[$name]
-    $dir = if ($WorkspaceDir) { Join-Path $WorkspaceDir $rel } else { '' }
+    $spec = $localPackages[$name]
+    $root = if ($spec.base -eq 'repo') { $RepoDir } else { $WorkspaceDir }
+    $dir = if ($root) { Join-Path $root $spec.rel } else { '' }
     if ($SkipLocalPackages) {
         $pkg.dependencies.PSObject.Properties.Remove($name)
-        $b = $pkg.dsh.profile.bundles
-        if ($b -contains $name) {
-            $idx = [array]::IndexOf([object[]]$b, $name)
-            if ($idx -ge 0) { $b = @($b | Where-Object { $_ -ne $name }); $pkg.dsh.profile.bundles = $b }
-        }
+        $pkg.dsh.profile.bundles = @($pkg.dsh.profile.bundles | Where-Object { $_ -ne $name })
         Write-Warn2 "$name 已按 -SkipLocalPackages 跳过"
     }
     elseif ($dir -and (Test-Path -LiteralPath $dir)) {
         $pkg.dependencies.$name = "link:$($dir -replace '\\','/')"
+        $rewritten++
         Write-Ok "$name -> $dir"
     }
     else {
-        $hint = if ($dir) { $dir } else { '<未定位到 workspace，请用 -WorkspaceDir 指定>' }
+        $hint = if ($dir) { $dir } else { "<未定位到 $($spec.base) 根目录，请用 -WorkspaceDir / -RepoDir 指定>" }
         $missing += "$name (期望路径: $hint)"
         $pkg.dependencies.PSObject.Properties.Remove($name)
         $pkg.dsh.profile.bundles = @($pkg.dsh.profile.bundles | Where-Object { $_ -ne $name })
@@ -137,8 +157,15 @@ if ($missing.Count -gt 0) {
 
 # ---------- 3. 写入 profile ----------
 Write-Step "写入 profile"
-# package.json 用改写后的内存对象直接写目标，源文件保持不动
-$pkg | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $ProfileDir 'package.json') -Encoding UTF8
+# package.json 用改写后的内存对象直接写目标，源文件保持不动。
+# 必须写成无 BOM 的 UTF-8：Windows PowerShell 5.1 的 Set-Content -Encoding UTF8
+# 会写入 BOM，而 node / pnpm 解析带 BOM 的 package.json 会失败。
+$json = $pkg | ConvertTo-Json -Depth 20
+[System.IO.File]::WriteAllText(
+    (Join-Path $ProfileDir 'package.json'),
+    $json,
+    (New-Object System.Text.UTF8Encoding($false))
+)
 Write-Ok "package.json（已按本机路径改写）"
 foreach ($f in @('pnpm-lock.yaml','pnpm-workspace.yaml')) {
     Copy-Item -LiteralPath (Join-Path $here $f) -Destination (Join-Path $ProfileDir $f) -Force
@@ -157,9 +184,10 @@ try {
         $exitCode = 2
     }
     else {
-        # 清单被改写（跳过了私有包）时，lock 与 package.json 必然不一致，
+        # 清单被改写（link 路径重写 / 跳过私有包）时，lock 与 package.json 必然不一致，
         # --frozen-lockfile 会直接失败；此时自动退化为普通安装。
-        $useFrozen = (-not $ForceUnfrozen) -and (-not $SkipLocalPackages) -and ($missing.Count -eq 0)
+        $changed = ($missing.Count -gt 0) -or ($rewritten -gt 0)
+        $useFrozen = (-not $ForceUnfrozen) -and (-not $SkipLocalPackages) -and (-not $changed)
         $pnpmArgs = @('install')
         if ($useFrozen) {
             $pnpmArgs += '--frozen-lockfile'

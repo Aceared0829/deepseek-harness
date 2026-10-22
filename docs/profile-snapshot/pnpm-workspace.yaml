@@ -10,6 +10,10 @@ minimumReleaseAgeExclude:
   - '@goodandready/dsh-time-machine@0.1.29'
   - '@goodandready/dsh-plugin-notify@0.4.4'
   - '@linxin666/dsh-pet@0.4.7'
+  - dsh-context@0.73.1 || 0.73.2 || 0.73.3
+  - dsh-connect-workbuddy@4.8.2 || 4.10.0 || 4.12.0 || 4.13.2 || 4.14.1
+  - '@modusensus/dsh-mneme@0.9.1'
+  - open-sea-skin@1.2.6
 allowBuilds:
   cpu-features: true
   ssh2: true

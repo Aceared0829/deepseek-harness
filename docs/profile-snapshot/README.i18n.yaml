@@ -8,15 +8,15 @@
 /dsh-profile-plugin-snapshot/contents:
   en: 7d0920f14a9c4f05
   zh: 879c254aee406e96
-/dsh-profile-plugin-snapshot/about-the-two-local-private-packages:
-  en: 1b744e0bdf4fea06
-  zh: ab43937e755eb06f
+/dsh-profile-plugin-snapshot/about-the-link-dependencies:
+  en: cf5489485e056aed
+  zh: 8139fc870db4f9fb
 /dsh-profile-plugin-snapshot/restoring:
   en: 695b80cf14fa9dbc
   zh: 84536f058b836fcc
 /dsh-profile-plugin-snapshot/restoring/parameters:
-  en: 445b4ec3c0a49335
-  zh: d6331f3540919243
+  en: fd89fd3c6aa7eea7
+  zh: f66f457b81973fab
 /dsh-profile-plugin-snapshot/restoring/exit-codes:
   en: 4a05240f77fad212
   zh: b667ecce9fa6f876
