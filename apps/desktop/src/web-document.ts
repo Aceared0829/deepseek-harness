@@ -35,6 +35,9 @@ export async function serveWebDocument(request: Request, root: string): Promise<
   })
 }
 
+/** Host-issued session cookie name, matched without importing the Connection package. */
+const HOST_COOKIE_PREFIX = 'dsh-auth-'
+
 /**
  * Exchange the Host launch URL for an authority-bound browser cookie.
  * @param url - Authenticated URL reported by the owned Host process.
@@ -47,6 +50,29 @@ export async function authenticateWebHost(url: string): Promise<string> {
   if (response.status !== 303 || cookie === null) throw new Error('Desktop Host authentication failed')
   const end = cookie.indexOf(';')
   return end < 0 ? cookie : cookie.slice(0, end)
+}
+
+/**
+ * The cookie name is keyed by the Host authority, and the Host listens on a
+ * fresh port each launch, so every start mints a differently named cookie with
+ * a multi-day lifetime. Electron's jar keys cookies by host only, so stale names
+ * accumulate until the request header crosses Node's 16 KiB limit and the
+ * authentication exchange fails with 431. Call this before the jar is used for
+ * that exchange: the launch token in the URL mints the one cookie it keeps, and
+ * forwarded requests carry their cookie explicitly instead of reading the jar.
+ * @param cookies - Electron session cookie jar for the Host origin.
+ * @param url - Authenticated URL reported by the owned Host process.
+ */
+export async function discardStaleHostCookies(
+  cookies: {
+    get(filter: { url: string }): Promise<readonly { readonly name: string }[]>
+    remove(url: string, name: string): Promise<void>
+  },
+  url: string,
+): Promise<void> {
+  const host = new URL(url).origin
+  const stale = (await cookies.get({ url: host })).filter(cookie => cookie.name.startsWith(HOST_COOKIE_PREFIX))
+  await Promise.all(stale.map(cookie => cookies.remove(host, cookie.name)))
 }
 
 /**

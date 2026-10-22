@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { authenticateWebHost, forwardWebRequest, serveWebDocument } from '../src/web-document.ts'
+import { authenticateWebHost, discardStaleHostCookies, forwardWebRequest, serveWebDocument } from '../src/web-document.ts'
 
 const roots: string[] = []
 afterEach(async () => {
@@ -33,6 +33,28 @@ it('requires the Host authentication exchange and retains only its cookie value'
   vi.stubGlobal('fetch', fetch)
   expect(await authenticateWebHost('http://127.0.0.1:1234/?token=owned')).toBe('session=owned')
   await expect(authenticateWebHost('http://127.0.0.1:1234/')).rejects.toThrow('authentication failed')
+})
+
+it('removes Host-issued cookies left by earlier launches without touching unrelated jar entries', async () => {
+  const removed: [string, string][] = []
+  const cookies = {
+    get: vi.fn().mockResolvedValue([
+      { name: 'dsh-auth-earlierlaunch' }, { name: 'dsh-auth-secondearlierlaunch' }, { name: 'preference' },
+    ]),
+    remove: vi.fn().mockImplementation(async (url: string, name: string) => { removed.push([url, name]) }),
+  }
+  await discardStaleHostCookies(cookies, 'http://127.0.0.1:5678/?token=owned')
+  expect(cookies.get).toHaveBeenCalledExactlyOnceWith({ url: 'http://127.0.0.1:5678' })
+  expect(removed).toEqual([
+    ['http://127.0.0.1:5678', 'dsh-auth-earlierlaunch'],
+    ['http://127.0.0.1:5678', 'dsh-auth-secondearlierlaunch'],
+  ])
+})
+
+it('leaves the jar untouched when no earlier launch left a Host cookie', async () => {
+  const cookies = { get: vi.fn().mockResolvedValue([{ name: 'preference' }]), remove: vi.fn() }
+  await discardStaleHostCookies(cookies, 'http://127.0.0.1:5678/?token=owned')
+  expect(cookies.remove).not.toHaveBeenCalled()
 })
 
 it('forwards upload bytes and cancellation with Host credentials while keeping the response streaming', async () => {
