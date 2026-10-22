@@ -38,7 +38,7 @@ import { claimDesktopSingleInstance } from './single-instance.ts'
 import { desktopUpdateChannel } from './update-channel.ts'
 import { DesktopUpdateCoordinator } from './update-coordinator.ts'
 import { DesktopCommandManager } from './command-management.ts'
-import { serveWebDocument, authenticateWebHost, forwardWebRequest } from './web-document.ts'
+import { serveWebDocument, authenticateWebHost, discardStaleHostCookies, forwardWebRequest } from './web-document.ts'
 import { DesktopFatalRecovery } from './fatal-recovery.ts'
 import { pruneCrashReports, RendererConsoleTail, writeCrashReport, type CrashReportSource } from './crash-report.ts'
 import { openWelcomeWindow } from './welcome-window.ts'
@@ -656,6 +656,10 @@ async function main(): Promise<void> {
         const ready = await host.start()
         hostCookie = await authenticateWebHost(ready.url)
         hostUrl = ready.url
+        // The Host mints one authority-keyed cookie per launch, and the jar keys by host, so names from
+        // earlier launches would otherwise accumulate until the request header exceeds 16 KiB and the
+        // welcome exchange fails with 431.
+        await discardStaleHostCookies(session.defaultSession.cookies, ready.url)
         welcomeBackend = await connectDesktopWelcome(ready.url, (input, init) => net.fetch(input, init), async () => (await session.defaultSession.cookies.get({ url: ready.url })).map(cookie => `${cookie.name}=${cookie.value}`).join('; '))
         analyticsEnabled = await welcomeBackend.analyticsEnabled().catch(() => false)
         if (!reportedLaunch) { reportedLaunch = true; void track('desktop_app_launch', {}) }

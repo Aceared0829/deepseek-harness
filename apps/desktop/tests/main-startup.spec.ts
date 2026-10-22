@@ -19,7 +19,7 @@ type InvokeHandler = (event: InvokeEvent, ...args: unknown[]) => unknown
 /** Absolute user-data directory the current test bound; the boot journal lives under it. */
 let bootJournalDirectory: string
 
-vi.mock('../src/web-document.ts', () => ({ authenticateWebHost: async () => 'test-cookie', serveWebDocument: vi.fn(), forwardWebRequest: vi.fn() }))
+vi.mock('../src/web-document.ts', () => ({ authenticateWebHost: async () => 'test-cookie', discardStaleHostCookies: vi.fn(), serveWebDocument: vi.fn(), forwardWebRequest: vi.fn() }))
 // Report persistence has its own unit tests; here it resolves within microtasks so the fatal
 // dialog never outlives the test that triggered it.
 vi.mock('../src/crash-report.ts', async importOriginal => ({
