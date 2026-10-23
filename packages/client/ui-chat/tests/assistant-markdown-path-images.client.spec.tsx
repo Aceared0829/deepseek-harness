@@ -115,6 +115,31 @@ describe('AssistantMarkdown local-path images', () => {
     expect(image?.getAttribute('alt')).toBe('diagram')
     expect(new URL(image?.getAttribute('src') ?? '').searchParams.get('path')).toBe('/work/charts/graph.png')
   })
+
+  /**
+   * The authored text of a real Session: a Windows destination inside `<...>`
+   * whose `\.` Markdown reads as a punctuation escape. Losing that separator
+   * made the file route answer 404, so the image only ever rendered alt text.
+   */
+  it.each([
+    ['single separators', String.raw`![ZCode 主界面](<D:\RSIHarness\.probe\zc_main.png>)`],
+    ['doubled separators', String.raw`![ZCode 主界面](<D:\\RSIHarness\\.probe\\zc_main.png>)`],
+  ])('keeps every Windows separator in a %s destination', (_name, authored) => {
+    vi.spyOn(document, 'baseURI', 'get').mockReturnValue(BASE)
+    const { container } = render(
+      <AssistantMarkdown renderSlot={() => null} useDisclosure={useDisclosure} useGroupAction={useSearchableHidden}
+        usePresentation={useDetailedPresentation}
+        blocks={[textBlock(`See ${authored} above.`)]}
+        streaming={false}
+        loadImage={unusedImageLoader}
+        t={t}
+      />,
+    )
+    const image = container.querySelector('img')
+    expect(image?.getAttribute('alt')).toBe('ZCode 主界面')
+    expect(new URL(image?.getAttribute('src') ?? '').searchParams.get('path'))
+      .toBe(String.raw`D:\RSIHarness\.probe\zc_main.png`)
+  })
 })
 
 it('decodes Markdown URL escapes once before encoding the file query', () => {
