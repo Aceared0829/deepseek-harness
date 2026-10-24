@@ -74,6 +74,29 @@ const EXCEEDS_MODEL_CONTEXT = new RegExp(
 )
 
 /**
+ * Chinese overflow wording. Gateways that answer in Chinese name the same
+ * condition with different words, and none of the English patterns above match
+ * CJK text at all — so an overflow from such a gateway used to be classified as
+ * a generic provider failure, leaving the compaction retry unarmed. The canonical
+ * case is WorkBuddy's CN gateway (`code 11115`, "本次输入加上历史对话超过了模型上限").
+ *
+ * Anchored on the bound being exceeded rather than on volume alone: "超过" must
+ * name a limit (上限/最大/限制) or the context itself, so provider chatter such as
+ * "超过最大重试次数" or "耗时超过限制" cannot be mistaken for an overflow.
+ */
+const CJK_CONTEXT_OVERFLOW = new RegExp(
+  // 输入/请求/对话/上下文 … 超过 … 上限/最大/限制
+  String.raw`(?:输入|请求|对话|上下文|提示词)`
+  + String.raw`[\s\S]{0,24}?`
+  + String.raw`(?:超过|超出|大于|突破)[了]?`
+  + String.raw`[\s\S]{0,16}?`
+  + String.raw`(?:上限|最大|限制|极限)`,
+)
+
+/** Explicit Chinese phrasing that spells out the context bound itself. */
+const CJK_CONTEXT_OVERFLOW_EXPLICIT = /(?:超过|超出)[^。]{0,6}?(?:模型|上下文)(?:的)?(?:上限|窗口|长度)/
+
+/**
  * Recognize the context-overflow wording used by OpenAI-compatible providers
  * and library adapters. Adapters pass all available provider code, type, and
  * message text so both thrown and in-band delivery styles share one classifier.
@@ -86,6 +109,8 @@ export function isContextWindowExceededError(detail: string): boolean {
     || TOO_LARGE_FOR_CONTEXT.test(detail)
     || /\b(?:input|prompt|request)\s+(?:is\s+)?too\s+(?:long|large)\s+for\s+(?:this|the)\s+model\b/i.test(detail)
     || EXCEEDS_MODEL_CONTEXT.test(detail)
+    || CJK_CONTEXT_OVERFLOW.test(detail)
+    || CJK_CONTEXT_OVERFLOW_EXPLICIT.test(detail)
 }
 
 /**

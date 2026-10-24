@@ -132,6 +132,25 @@ describe('LlmRuntime', () => {
     expect(isContextWindowExceededError('context window size must be positive')).toBe(false)
   })
 
+  it('recognizes Chinese context-overflow wording from CJK gateways', () => {
+    // WorkBuddy CN gateway code 11115, verbatim.
+    expect(isContextWindowExceededError(
+      'workbuddy 上游失败：请求被上游拒绝（http 400）（code 11115）。'
+      + '本次输入加上历史对话超过了模型上限。请精简内容、删掉大附件，或新建任务',
+    )).toBe(true)
+    expect(isContextWindowExceededError('本次输入超过了模型上限')).toBe(true)
+    expect(isContextWindowExceededError('上下文长度超出限制')).toBe(true)
+    expect(isContextWindowExceededError('对话超出模型窗口')).toBe(true)
+  })
+
+  it('does not mistake Chinese non-overflow wording for context overflow', () => {
+    expect(isContextWindowExceededError('该请求被上游按参数拒绝')).toBe(false)
+    expect(isContextWindowExceededError('模型当前负载较高')).toBe(false)
+    expect(isContextWindowExceededError('超过最大重试次数')).toBe(false)
+    expect(isContextWindowExceededError('耗时超过限制')).toBe(false)
+    expect(isContextWindowExceededError('账号额度不足')).toBe(false)
+  })
+
   it('distinguishes exhausted account quota from transient rate limiting', () => {
     for (const detail of [
       'insufficient_quota',
