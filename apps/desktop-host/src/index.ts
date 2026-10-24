@@ -10,6 +10,7 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-deepseek-account'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import * as desktopOffice from './office.ts'
+import { localDragResource } from './file-drag.ts'
 
 import { installDesktopUpdateTaskControl } from './update-tasks.ts'
 import { installDesktopQuitInspection } from './quit-inspection.ts'
@@ -43,6 +44,8 @@ async function main(): Promise<void> {
     }),
   })
   let stopping: Promise<void> | undefined
+  const dragReads = new Map<number, AbortController>()
+  const dragTasks = new Set<Promise<void>>()
   const control: {
     updateTasks?: ReturnType<typeof installDesktopUpdateTaskControl>
     quitInspection?: ReturnType<typeof installDesktopQuitInspection>
@@ -59,6 +62,8 @@ async function main(): Promise<void> {
   const stop = (): Promise<void> => stopping ??= (async () => {
     for (const release of bootLeases.values()) release()
     bootLeases.clear()
+    for (const abort of dragReads.values()) abort.abort()
+    await Promise.allSettled(dragTasks)
     // The histogram owns a timer; releasing it keeps teardown from leaving one armed.
     sampling.current?.stop()
     // Startup failure is reported by main; shutdown only owns a tree that booted.
@@ -66,10 +71,38 @@ async function main(): Promise<void> {
     await running?.shutdown.shutdown(0)
     await send({ type: 'shutdown-complete' })
     if (process.connected) process.disconnect()
+    // A handle a disposed plugin left open would otherwise keep the Host alive past the shell's graceful
+    // deadline; a startup failure keeps its own diagnostic exit.
+    if (running !== undefined) process.exit()
   })()
   process.on('message', (message: unknown) => {
     if (typeof message !== 'object' || message === null || !('type' in message)) return
     if (message.type === 'shutdown') { void stop(); return }
+    if (message.type === 'file-drag-cancel') {
+      if ('requestId' in message && typeof message.requestId === 'number') dragReads.get(message.requestId)?.abort()
+      return
+    }
+    if (message.type === 'file-drag-resource') {
+      if (!('requestId' in message) || typeof message.requestId !== 'number' || !Number.isSafeInteger(message.requestId)
+        || !('address' in message) || typeof message.address !== 'string') return
+      const { requestId, address } = message
+      const abort = new AbortController()
+      dragReads.set(requestId, abort)
+      const task = (async () => {
+        try {
+          if (stopping !== undefined) throw new Error('Host stopping')
+          const { ctx } = await application
+          const resource = await localDragResource(ctx, address, abort.signal)
+          await send({ type: 'file-drag-resource', requestId, resource })
+        } catch (error) {
+          if (!abort.signal.aborted) console.error(error)
+          await send({ type: 'file-drag-resource', requestId, resource: null, error: 'File drag resource unavailable' })
+        } finally { dragReads.delete(requestId) }
+      })().catch((error: unknown) => { console.error(error) })
+      dragTasks.add(task)
+      void task.finally(() => { dragTasks.delete(task) })
+      return
+    }
     if (message.type === 'quit-inspection') {
       if (!('requestId' in message) || !Number.isSafeInteger(message.requestId)) return
       const requestId = message.requestId
@@ -156,7 +189,7 @@ async function main(): Promise<void> {
     if (clientModules === undefined) throw new Error('desktop boot: client modules are unavailable')
     const release = clientModules.retainBootResponses()
     try {
-      const injections = ctx.webServer.collectIndexInjections()
+      const injections = ctx.webServer.collectIndexInjections(ctx.connection.browserPeer)
       const lease = `boot-${String(nextBootLease)}`
       nextBootLease += 1
       bootLeases.set(lease, release)

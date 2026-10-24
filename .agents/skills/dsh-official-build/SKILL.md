@@ -49,7 +49,7 @@ outcomes:
     const version = {}.DSH_CLIENT_VERSION;   // undefined forever
 
     // official script
-    function localBuildVersion() { return `0.2.1-rc.2-cb580fe-dirty`; }
+    function localBuildVersion() { return `0.2.1-rc.2-<commit>-dirty`; }
 
 `-dirty` is correct and expected while the worktree holds uncommitted changes. Its absence on a
 dirty tree is the signal that the environment did not reach the bundler.

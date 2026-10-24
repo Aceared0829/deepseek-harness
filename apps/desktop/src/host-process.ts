@@ -23,6 +23,11 @@ interface PlatformSessionEvent {
 }
 
 type DesktopHostEvent = ReadyEvent | FatalEvent | PlatformSessionEvent | { readonly type: 'shutdown-complete' } | {
+  readonly type: 'file-drag-resource'
+  readonly requestId: number
+  readonly resource: { readonly path: string; readonly sha256: string; readonly size: number } | null
+  readonly error?: string
+} | {
   readonly type: 'update-tasks'
   readonly requestId: number
   readonly active: boolean
@@ -129,6 +134,13 @@ function isDesktopHostEvent(message: unknown): message is DesktopHostEvent {
     case 'boot-injections-release':
       return Number.isSafeInteger(candidate.requestId)
         && (candidate.error === undefined || typeof candidate.error === 'string')
+    case 'file-drag-resource': {
+      const resource = candidate.resource
+      return Number.isSafeInteger(candidate.requestId) && (candidate.error === undefined || typeof candidate.error === 'string')
+        && (resource === null || (typeof resource === 'object' && 'path' in resource && typeof resource.path === 'string'
+          && 'sha256' in resource && typeof resource.sha256 === 'string' && /^[a-f0-9]{64}$/u.test(resource.sha256)
+          && 'size' in resource && typeof resource.size === 'number' && Number.isSafeInteger(resource.size) && resource.size >= 0))
+    }
     case 'quit-inspection':
       return Number.isSafeInteger(candidate.requestId) && typeof candidate.activeTasks === 'boolean'
         && typeof candidate.scheduledTasks === 'boolean' && (candidate.error === undefined || typeof candidate.error === 'string')
@@ -322,7 +334,7 @@ export class DesktopHostProcess {
     if (this.unavailable()) return undefined
     try {
       const response = await this.control({ type: 'update-tasks', action: 'inspect' }, deadlineMs,
-        'desktop liveness: probe timed out')
+        'desktop liveness: probe timed out', 'desktop liveness')
       return response.type === 'update-tasks' ? response.eventLoopDelay : undefined
     } catch (error) {
       // The child can finish exiting between the check above and this answer.
@@ -344,7 +356,7 @@ export class DesktopHostProcess {
    * an unanswered drain fails at the control-request deadline without authorizing installation.
    */
   async updateTasks(action: 'inspect' | 'lock' | 'unlock'): Promise<boolean> {
-    const response = await this.control({ type: 'update-tasks', action }, 10_000, 'desktop update: task inspection timed out')
+    const response = await this.control({ type: 'update-tasks', action }, 10_000, 'desktop update: task inspection timed out', 'desktop update')
     if (response.type !== 'update-tasks') throw new Error('desktop update: Host answered with a different control response')
     return response.active
   }
@@ -355,7 +367,7 @@ export class DesktopHostProcess {
    * {@link QUIT_INSPECTION_DEADLINE_MS}, and the shell then asks before quitting.
    */
   async inspectQuit(): Promise<DesktopQuitInspection> {
-    const response = await this.control({ type: 'quit-inspection' }, QUIT_INSPECTION_DEADLINE_MS, 'desktop quit: inspection timed out')
+    const response = await this.control({ type: 'quit-inspection' }, QUIT_INSPECTION_DEADLINE_MS, 'desktop quit: inspection timed out', 'desktop quit')
     if (response.type !== 'quit-inspection') throw new Error('desktop quit: Host answered with a different control response')
     return { activeTasks: response.activeTasks, scheduledTasks: response.scheduledTasks }
   }
@@ -366,7 +378,8 @@ export class DesktopHostProcess {
    * @returns The current boot injection table and its Host lease.
    */
   async bootInjections(): Promise<DesktopBootInjections> {
-    const response = await this.control({ type: 'boot-injections' }, 10_000, 'desktop boot: injections timed out')
+    const response = await this.control({ type: 'boot-injections' }, 10_000,
+      'desktop boot: injections timed out', 'desktop boot')
     if (response.type !== 'boot-injections' || response.injections === undefined || response.lease === undefined) {
       throw new Error(response.error === undefined
         ? 'desktop boot: Host answered without injections'
@@ -382,35 +395,57 @@ export class DesktopHostProcess {
   async releaseBootInjections(lease: string): Promise<void> {
     if (lease === '') throw new Error('desktop boot: lease must not be empty')
     const response = await this.control({ type: 'boot-injections-release', lease }, 10_000,
-      'desktop boot: lease release timed out')
+      'desktop boot: lease release timed out', 'desktop boot')
     if (response.type !== 'boot-injections-release') {
       throw new Error('desktop boot: Host answered with a different control response')
     }
     if (response.error !== undefined) throw new Error(`desktop boot: ${response.error}`)
   }
 
+  /**
+   * @param address - Session-scoped file reference.
+   * @param signal - preparation cancellation.
+   * @returns privately authorized local resource, or null when nonlocal.
+   */
+  async resolveDragResource(address: string, signal?: AbortSignal): Promise<
+    { readonly path: string; readonly sha256: string; readonly size: number } | null
+  > {
+    const response = await this.control({ type: 'file-drag-resource', address }, 12_000, 'File drag authorization timed out', 'file drag', signal)
+    if (response.type !== 'file-drag-resource') throw new Error('Host returned a different control response')
+    return response.resource
+  }
+
   private async control(
     request: { readonly type: 'update-tasks'; readonly action: 'inspect' | 'lock' | 'unlock' }
       | { readonly type: 'quit-inspection' } | { readonly type: 'boot-injections' }
-      | { readonly type: 'boot-injections-release'; readonly lease: string },
-    deadlineMs: number, deadlineMessage: string,
+      | { readonly type: 'boot-injections-release'; readonly lease: string }
+      | { readonly type: 'file-drag-resource'; readonly address: string },
+    deadlineMs: number, deadlineMessage: string, operation: string, signal?: AbortSignal,
   ): Promise<DesktopHostControlResponse> {
     const child = this.child
     if (child === undefined || !child.connected || this.failureReported || this.stopping) {
-      const subject = request.type === 'update-tasks' ? 'desktop update'
-        : request.type === 'quit-inspection' ? 'desktop quit' : 'desktop boot'
-      throw new Error(`${subject}: Host is unavailable`)
+      throw new Error(`${operation}: Host is unavailable`)
     }
+    signal?.throwIfAborted()
     const requestId = this.nextControlId++
     let timer: ReturnType<typeof setTimeout> | undefined
+    const abort = (): void => {
+      if (request.type === 'file-drag-resource' && child.connected) child.send({ type: 'file-drag-cancel', requestId }, (_error) => {
+        // The request still rejects locally if the Host has disconnected.
+      })
+      const reason: unknown = signal?.reason
+      this.controlRequests.get(requestId)?.reject(reason instanceof Error ? reason : new Error(deadlineMessage))
+    }
     try {
       return await new Promise<DesktopHostControlResponse>((resolve, reject) => {
         this.controlRequests.set(requestId, { resolve, reject })
-        timer = setTimeout(() => { reject(new Error(deadlineMessage)) }, deadlineMs)
+        timer = setTimeout(abort, deadlineMs)
+        signal?.addEventListener('abort', abort, { once: true })
         child.send({ ...request, requestId }, (error) => { if (error !== null) reject(error) })
       })
     } finally {
       clearTimeout(timer)
+      signal?.removeEventListener('abort', abort)
       this.controlRequests.delete(requestId)
     }
   }
