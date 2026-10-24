@@ -157,3 +157,13 @@ Symptom: the model selector failed with `cannot get property "remote.session" wi
 Cause: Cordis tracks service method calls under the caller context. Inside `directoryFor()`, `this.ctx.sessions` returned the original owner's service, but reading `this.ctx.remote.session` enforced the caller's inject list, which omitted `remote.session`, so the proxy threw before returning the dependency.
 
 Rule: capture a dependency while the providing context is current, or read it with `ctx.get(name)`. Do not assume the service's own static inject list authorizes a `this.ctx` property-proxy read during a caller-tracked method. Exercise the consumer with the minimum inject needed to reach the service, not only through the service's own plugin.
+
+## 2026-10-24 - Mixed rc.2 profile plugins disabled session creation on an rc.3 runtime
+
+Symptom: the desktop shell and sidebar loaded, but opening or creating a Session failed with `gateway/service-unavailable: typert gateway: session/create: active Service "sessionController" is unavailable`. The profile patch contained no disable for `session-query-sqlite`, yet the live Loader reported that entry as `disabled: true`; `sessionQuery` was never published, so `session-controller`, `session-reference`, and `ui-deliverables` stayed pending.
+
+`session/list` and `session/create` returned successfully after the official optional bundles and their `@deepseek-ai/dsh-*` closure moved from `0.2.1-rc.2` to `0.2.1-rc.3`, while the runtime remained `0.2.1-rc.3`.
+
+The rc.3 compatibility preflight had disabled the rc.2 `session-query-sqlite` entry because its `peerDependencies` did not include the running runtime line. Disabling compatibility checks or re-enabling only that entry would not have fixed the other rc.2 optional bundles and would have hidden the dependency mismatch.
+
+Rule: after upgrading a DSH runtime, inventory every official bundle in the profile and update the whole official dependency closure through the official package-manager entry before diagnosing Session services. Confirm that the profile dependency versions, `pnpm-lock.yaml`, and every running bundle agree on the runtime line. Do not patch one disabled entry or disable the compatibility preflight; then verify the live service publication, an existing Session's history, and a newly created Session.
