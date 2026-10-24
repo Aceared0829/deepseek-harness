@@ -118,6 +118,7 @@ Before pushing, follow [dsh-pre-push-checks](.agents/skills/dsh-pre-push-checks/
 - Never default to the full suite or repeat a passing check for commit or push. CI owns exhaustive coverage and the platform matrix; rehearse all locally only by explicit request, for CI diagnosis, or for an irreducibly repository-wide change.
 - `test:coverage`, not `test`, is the CI coverage gate ([why](docs/testing.md)).
 - Develop with `build:artifacts`; before claiming completion, run `build:check` after the latest `build:artifacts`, or `build` ([layout](docs/development.md#typescript-project-layout)).
+- **Client build values need the build entry.** `npx tsdown` inside one `packages/client/*` directory bypasses `scripts/build.ts`: the client define turns `process.env` into `{}`, artifacts keep `{}.DSH_CLIENT_VERSION`, and the GUI shows a blank version. Use `build:artifacts`; never hand-set these values, which [`scripts/client-build-environment.ts:118`](scripts/client-build-environment.ts) recomputes from `package.json` and Git.
 - **Web browser automation and GIF recording:** launch with `pnpm dsh web --patch apps/web/tests/pin-browse-picker.overlay.yml` to use the [in-page directory picker](apps/web/tests/pin-browse-picker.overlay.yml); omit this override only when testing native picker behavior explicitly.
 
 ## Secrets / .env
