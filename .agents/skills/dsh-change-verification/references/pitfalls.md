@@ -167,3 +167,11 @@ Symptom: the desktop shell and sidebar loaded, but opening or creating a Session
 The rc.3 compatibility preflight had disabled the rc.2 `session-query-sqlite` entry because its `peerDependencies` did not include the running runtime line. Disabling compatibility checks or re-enabling only that entry would not have fixed the other rc.2 optional bundles and would have hidden the dependency mismatch.
 
 Rule: after upgrading a DSH runtime, inventory every official bundle in the profile and update the whole official dependency closure through the official package-manager entry before diagnosing Session services. Confirm that the profile dependency versions, `pnpm-lock.yaml`, and every running bundle agree on the runtime line. Do not patch one disabled entry or disable the compatibility preflight; then verify the live service publication, an existing Session's history, and a newly created Session.
+
+## 2026-10-24 - Old install's profile junctions shadowed the new runtime packages
+
+Symptom: the installed rc.3 Desktop app opened no window, while its Host log ended at `typert-loader: @deepseek-ai/dsh-api-workspace-files ... parameter codec has no create() factory`. The installer's own archived `typert.host.js` did contain the rc.3 `create()` factory, so the failing package was not the one packaged with the app.
+
+Cause: `C:\Users\zzn19\.dsh\profiles\desktop` belonged to an earlier RedSpark 0.1.5-rc.2 installation and held 196 `node_modules\@deepseek-ai\*` junctions into that old install. The profile path, not the packaged runtime root, resolved those packages first, so rc.3's loader consumed rc.2 Typert manifests. Repairing only the profile manifest or clearing `boot-failures.json` left the junction graph in place.
+
+Rule: on a Windows Desktop runtime upgrade, inspect every junction under the default profile's `node_modules` before trusting a successful package build. A profile whose runtime-state version or link targets name another product installation must be backed up and retired, never reused as a link farm for the new runtime. Put durable home data outside the checkout, point both installed and development launchers at it, verify the live Host's profile argument, and start through the real shortcut with its normal window style. A living Host process alone is not evidence of a working window.
