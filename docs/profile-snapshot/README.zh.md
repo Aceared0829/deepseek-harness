@@ -15,17 +15,16 @@
 
 ## 关于 `link:` 依赖
 
-`package.json` 里有 7 个 `link:` 依赖，它们**不是 npm 上的包**，新设备上没有这些目录，直接安装会失败。其中 5 个在 `<workspace>`（`default-workspace` 根）下，2 个在 DSH 仓库内：
+`package.json` 里有 6 个 `link:` 依赖，它们**不是 npm 上的包**，新设备上没有这些目录，直接安装会失败。其中 5 个在 `<workspace>`（`default-workspace` 根）下，1 个在 DSH 仓库内：
 
 | 包 | 期望位置 |
 | --- | --- |
 | `@local/dsh-desktop-extras` | `<workspace>/bundles/desktop-extras` |
-| `@dsh-pet/bridge` | `<workspace>/pet-src/integrations/dsh-pet-bridge` |
-| `@dsh-pet/lifecycle` | `<workspace>/dsh-kit/plugins/dsh-pet-lifecycle` |
+| `@local/dsh-image-viewer` | `<workspace>/bundles/dsh-image-viewer` |
 | `dsh-connect-grok` | `<workspace>/dsh-connect-grok` |
 | `dsh-connect-workbuddy` | `<workspace>/bundles/dsh-connect-workbuddy` |
+| `dsh-turn-autocontinue` | `<workspace>/bundles/dsh-turn-autocontinue` |
 | `dsh-harness-eval` | `<repo>/plugins/harness-eval` |
-| `@deepseek-ai/dsh-subagent-claude-code` | `<repo>/packages/subagent/subagent-claude-code` |
 
 `restore.ps1` 会自动检测：目录存在就按本机路径重新 link，不存在就提示你并从清单里移除该包。**这不是快照本身的问题，是这些包本来就只存在于本机。**
 

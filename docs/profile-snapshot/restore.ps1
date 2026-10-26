@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     把本快照还原到一台新设备的 DSH profile。
 
@@ -115,12 +115,11 @@ $pkg = Get-Content $srcPkgPath -Raw -Encoding UTF8 | ConvertFrom-Json
 # 顺序无关；只处理确实出现在 dependencies 里的条目。
 $localPackages = [ordered]@{
     '@local/dsh-desktop-extras'              = @{ base = 'workspace'; rel = 'bundles\desktop-extras' }
-    '@dsh-pet/bridge'                        = @{ base = 'workspace'; rel = 'pet-src\integrations\dsh-pet-bridge' }
-    '@dsh-pet/lifecycle'                     = @{ base = 'workspace'; rel = 'dsh-kit\plugins\dsh-pet-lifecycle' }
+    '@local/dsh-image-viewer'                = @{ base = 'workspace'; rel = 'bundles\dsh-image-viewer' }
     'dsh-connect-grok'                       = @{ base = 'workspace'; rel = 'dsh-connect-grok' }
     'dsh-connect-workbuddy'                  = @{ base = 'workspace'; rel = 'bundles\dsh-connect-workbuddy' }
+    'dsh-turn-autocontinue'                  = @{ base = 'workspace'; rel = 'bundles\dsh-turn-autocontinue' }
     'dsh-harness-eval'                       = @{ base = 'repo';      rel = 'plugins\harness-eval' }
-    '@deepseek-ai/dsh-subagent-claude-code'  = @{ base = 'repo';      rel = 'packages\subagent\subagent-claude-code' }
 }
 
 $missing = @()

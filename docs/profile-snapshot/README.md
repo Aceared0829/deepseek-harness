@@ -15,17 +15,16 @@ Carry a DSH profile from one device to another: plugin roster, locked versions, 
 
 ## About the `link:` dependencies
 
-`package.json` links seven dependencies that are **not published packages**, so a new device has no such directories and a plain install fails. Five live under `<workspace>` (the `default-workspace` root); two live inside the DSH repository:
+`package.json` links six dependencies that are **not published packages**, so a new device has no such directories and a plain install fails. Five live under `<workspace>` (the `default-workspace` root); one lives inside the DSH repository:
 
 | Package | Expected location |
 | --- | --- |
 | `@local/dsh-desktop-extras` | `<workspace>/bundles/desktop-extras` |
-| `@dsh-pet/bridge` | `<workspace>/pet-src/integrations/dsh-pet-bridge` |
-| `@dsh-pet/lifecycle` | `<workspace>/dsh-kit/plugins/dsh-pet-lifecycle` |
+| `@local/dsh-image-viewer` | `<workspace>/bundles/dsh-image-viewer` |
 | `dsh-connect-grok` | `<workspace>/dsh-connect-grok` |
 | `dsh-connect-workbuddy` | `<workspace>/bundles/dsh-connect-workbuddy` |
+| `dsh-turn-autocontinue` | `<workspace>/bundles/dsh-turn-autocontinue` |
 | `dsh-harness-eval` | `<repo>/plugins/harness-eval` |
-| `@deepseek-ai/dsh-subagent-claude-code` | `<repo>/packages/subagent/subagent-claude-code` |
 
 `restore.ps1` detects this: it links each directory to its real path on this device when it exists, and otherwise tells you and drops that package from the roster. **This is not a defect in the snapshot; those packages only ever existed on the original machine.**
 
