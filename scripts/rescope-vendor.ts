@@ -667,7 +667,10 @@ function main(): void {
   const mode = args.includes('--apply') ? 'apply' : args.includes('--check') ? 'check' : 'dry'
   const reverse = args.includes('--reverse')
   const all = patterns(reverse)
-  const files = execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' })
+  // The tracked path list outgrows execFileSync's 1 MiB stdout default, which fails the gate with
+  // ENOBUFS before it reads anything. A null-delimited listing of every tracked path is larger than
+  // anything here needs to stream, so the bound is raised rather than guessed per repository size.
+  const files = execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
     .split('\0')
     .filter(file => file !== '' && !isRescopeExcluded(file))
 
