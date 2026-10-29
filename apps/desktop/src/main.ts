@@ -2,7 +2,7 @@ import type { ProductEventMap, ProductEvent } from '@deepseek-ai/dsh-client-prod
 import { WINDOWS_TITLEBAR_HEIGHT } from './windows-layout.ts'
 /** Electron shell: desktop project ownership, custom protocol, windows, and lifecycle. */
 
-import { readFile, writeFile } from 'node:fs/promises'
+import { access, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
@@ -43,6 +43,8 @@ import { DesktopCommandManager } from './command-management.ts'
 import { serveWebDocument, authenticateWebHost, discardStaleHostCookies, forwardWebRequest } from './web-document.ts'
 import { DesktopFatalRecovery } from './fatal-recovery.ts'
 import { pruneCrashReports, RendererConsoleTail, writeCrashReport, type CrashReportSource } from './crash-report.ts'
+import { OperationJournal } from './operation-journal.ts'
+import { runOperationReportJob, type OperationReportJobResult } from './operation-report-job.ts'
 import { openWelcomeWindow } from './welcome-window.ts'
 import { WELCOME_IPC, needsWelcome, type WelcomeNotice } from './welcome-api.ts'
 import { connectDesktopWelcome, type DesktopWelcomeBackend } from './welcome-backend.ts'
@@ -58,6 +60,7 @@ import { desktopClientMetadata, desktopClientVersion } from './client-metadata.t
 import { DesktopMandatoryUpdateWindow } from './mandatory-update-window.ts'
 import { DesktopPolicyTestAuth } from './policy-test-auth.ts'
 import { readDesktopSettings } from './settings.ts'
+import { readDesktopLocaleCache, writeDesktopLocaleCache } from './locale-cache.ts'
 import { DesktopUpdateDialog, type UpdateDialogOptions } from './update-dialog.ts'
 import { readDesktopRuntime } from './runtime-tree.ts'
 import { DesktopBrowserGuests } from './browser-guests.ts'
@@ -68,14 +71,14 @@ import { DesktopTray } from './tray.ts'
 import { DesktopBackgroundNotice } from './background-notice.ts'
 
 let focusPrimaryWindow = (): void => {}
-let stopForRecovery = async (): Promise<void> => {}
+let stopForRecovery = async (): Promise<void> => { await stopOperationReports() }
 let shuttingDown = false
 /**
  * Set by quit entries that must not ask: crash recovery exit and restart, and the
  * development restart command. The installer handoff has its own before-quit branch.
  */
 let skipQuitConfirmation = false
-let windowsLanguage: string | undefined
+let windowsLanguage: string | undefined = readDesktopLocaleCache(app.getPath('userData'))
 /**
  * Whether the backend has reached ready: false until the first ready, back to
  * false when a restart returns it to starting, frozen during shutdown so a
@@ -122,10 +125,39 @@ const recovery = new DesktopFatalRecovery({
   exit: () => { quitWithoutConfirmation() },
   restart: () => { app.relaunch(); quitWithoutConfirmation() },
   writeReport: (error, source) => persistCrashReport(error, source),
+  revealReport: async (path) => { await access(path); shell.showItemInFolder(path) },
 })
 
+let operationJournal: OperationJournal | undefined
+let operationReportJob: Promise<OperationReportJobResult> | undefined
+let operationReportAbort: AbortController | undefined
+let operationReportsStopping = false
+let operationReportStop: Promise<void> | undefined
+
+/** Bound application shutdown waiting without claiming that an unresponsive Worker has exited. */
+function stopOperationReports(): Promise<void> {
+  operationReportStop ??= waitForOperationReports()
+  return operationReportStop
+}
+
+async function waitForOperationReports(): Promise<void> {
+  operationReportsStopping = true
+  operationReportAbort?.abort()
+  const job = operationReportJob
+  if (job === undefined) return
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    const exited = await Promise.race([job.then(() => true), new Promise<false>((resolve) => {
+      timer = setTimeout(() => { resolve(false) }, 500)
+    })])
+    if (!exited) console.error('dsh desktop: operation report Worker has not exited; continuing shutdown')
+  } finally { clearTimeout(timer) }
+}
+
 function persistCrashReport(error: unknown, source: CrashReportSource): Promise<string | undefined> {
-  return writeCrashReport(app.getPath('logs'), {
+  const directory = app.getPath('logs')
+  const report = writeCrashReport(directory, {
+    operationHistoryPlanned: !shuttingDown && !operationReportsStopping,
     source,
     phase: backendReady ? 'running' : 'startup',
     error,
@@ -137,6 +169,17 @@ function persistCrashReport(error: unknown, source: CrashReportSource): Promise<
     },
     time: new Date(),
   })
+  void report.then((path) => {
+    if (path !== undefined && operationReportJob === undefined && !shuttingDown && !operationReportsStopping) {
+      operationReportAbort = new AbortController()
+      operationReportJob = runOperationReportJob({ reportPath: path, directory: join(app.getPath('userData'), 'plugin-operations'),
+        limits: { bytes: 64 * 1024, recordBytes: 4096, records: 100, outputBytes: 64 * 1024 },
+        journal: operationJournal?.status() ?? null,
+      }, { timeoutMs: 500, cancellationGraceMs: 100 }, operationReportAbort.signal)
+      void operationReportJob.finally(() => { operationReportJob = undefined; operationReportAbort = undefined })
+    }
+  }).catch((_error: unknown) => { /* Basic persistence failure is owned by fatal recovery. */ })
+  return report
 }
 
 function reportFatal(error: unknown, source: CrashReportSource): void {
@@ -146,7 +189,12 @@ function reportFatal(error: unknown, source: CrashReportSource): void {
     void persistCrashReport(error, source)
     return
   }
-  void recovery.report(error, source).catch((failure: unknown) => { console.error(failure); app.exit(1) })
+  void recovery.report(error, source).catch(async (failure: unknown) => {
+    console.error(failure)
+    shuttingDown = true
+    await stopOperationReports()
+    app.exit(1)
+  })
 }
 
 protocol.registerSchemesAsPrivileged([{
@@ -393,7 +441,8 @@ async function main(): Promise<void> {
   let updateStopFailure: DesktopHostUncleanExitError | undefined
   let updateState: DesktopUpdateState = { phase: 'idle' }
   const systemLanguages = app.getPreferredSystemLanguages()
-  let locale = resolveDesktopStartupLocale(null, systemLanguages)
+  let locale = windowsLanguage === undefined
+    ? resolveDesktopStartupLocale(null, systemLanguages) : resolveDesktopLocale(windowsLanguage)
   windowsLanguage = locale.id
   let mandatoryPolicy: DesktopMandatoryUpdatePolicy | undefined
   let mandatoryUI: DesktopMandatoryUpdateWindow | undefined
@@ -673,7 +722,12 @@ async function main(): Promise<void> {
       hostInspectPort, { ...hostEnvironment, DSH_CLIENT_VERSION: desktopClientVersion() }, onFailure,
       primaryRuntime,
       resources, (next) => { platformView.setSession(next) },
-      resolveDurationMs(process.env, 'DSH_DESKTOP_HOST_READY_TIMEOUT_MS', HOST_READY_TIMEOUT_MS))
+      resolveDurationMs(process.env, 'DSH_DESKTOP_HOST_READY_TIMEOUT_MS', HOST_READY_TIMEOUT_MS), (record) => {
+        operationJournal ??= new OperationJournal(join(app.getPath('userData'), 'plugin-operations'), {
+          segmentBytes: 256 * 1024, recordBytes: 4096, queuedBytes: 64 * 1024,
+        })
+        operationJournal.enqueue(JSON.stringify(record))
+      })
     return {
       start: async () => {
         const ready = await host.start()
@@ -784,6 +838,10 @@ async function main(): Promise<void> {
         fileDragStopped = false
       }
       const restoreHost = state.failedOperation === 'install' && updateStoppedHost && !quitting
+      if (state.failedOperation === 'install' && !quitting) {
+        operationReportsStopping = shuttingDown
+        operationReportStop = undefined
+      }
       shellInstallerOwnsQuit = false
       updateStoppedHost = false
       if (!quitting && (backend.host !== undefined || restoreHost)) openBootAdmission()
@@ -813,7 +871,11 @@ async function main(): Promise<void> {
     if (backend.host === undefined || welcomeBackend === undefined) throw new Error('desktop welcome: backend unavailable')
     return welcomeBackend.read()
   }
-  stopForRecovery = () => backend.close()
+  stopForRecovery = async () => {
+    const reports = stopOperationReports()
+    try { await backend.close() }
+    finally { await Promise.all([operationJournal?.drain(500), reports]) }
+  }
 
   const reconcileBackend = (): Promise<void> => {
     startup ??= (async () => {
@@ -917,14 +979,17 @@ async function main(): Promise<void> {
         await disposeFileDrag().catch((error: unknown) => { console.error(error) })
         requireCleanStop = true
         updateStopFailure = undefined
-        await backend.stop()
+        await Promise.all([backend.stop(), stopOperationReports()])
         updateStoppedHost = true
         // The backend's async cleanup callback can assign this after the reset above.
         const stopFailure = updateStopFailure as DesktopHostUncleanExitError | undefined
         if (stopFailure !== undefined) throw new DesktopUpdatePreparationError('stop-failed', locale.messages.updateStopFailed, stopFailure.message)
+        await operationJournal?.drain(500)
         updateJournal?.action('install-confirmed')
         shellInstallerOwnsQuit = true
       } catch (error) {
+        operationReportsStopping = shuttingDown
+        operationReportStop = undefined
         if (!updateStoppedHost) await host.updateTasks('unlock').catch((unlockError: unknown) => { console.error(unlockError) })
         throw error
       } finally {
@@ -1099,6 +1164,7 @@ async function main(): Promise<void> {
     if (window === undefined || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame
       || typeof next !== 'string') return
     const current = resolveDesktopStartupLocale(next, systemLanguages)
+    writeDesktopLocaleCache(app.getPath('userData'), current.id)
     if (current.id === locale.id) return
     locale = current
     platformView.notifyLocaleChanged()
@@ -1383,13 +1449,11 @@ async function main(): Promise<void> {
         Menu.buildFromTemplate(items).popup({ window, x: Math.round(x * zoom), y: Math.round(y * zoom), callback: resolve })
       })
     })
-    ipcMain.on(DESKTOP_IPC.windowsAppearance, (event, language: unknown, color: unknown, symbolColor: unknown) => {
+    ipcMain.on(DESKTOP_IPC.windowsAppearance, (event, _language: unknown, color: unknown, symbolColor: unknown) => {
       if (mainWindow === undefined || event.sender !== mainWindow.webContents
         || event.senderFrame !== mainWindow.webContents.mainFrame) return
       if (!event.senderFrame.url.startsWith(`${SCHEME}://app/`)) return
-      if (typeof language === 'string' && /^[a-zA-Z]+(?:-[a-zA-Z0-9]+)*$/u.test(language)) {
-        windowsLanguage = language
-      }
+      // Document lang starts as English before Host locale bootstrap; only localeChanged owns shell language.
       // Empty colors precede client stylesheet installation; only CSS color values cross IPC.
       const validColor = (value: unknown): value is string => typeof value === 'string'
         && /^(?:#[\da-f]{3,8}|rgba?\([\d.,%\s]+\))$/iu.test(value)
@@ -1547,6 +1611,7 @@ async function main(): Promise<void> {
     const state = await readWelcomeState()
     if (isQuitting() || backend.state.phase !== 'ready') return
     locale = resolveDesktopStartupLocale(state.localePreference, systemLanguages)
+    writeDesktopLocaleCache(app.getPath('userData'), locale.id)
     windowsLanguage = locale.id
     refreshApplicationMenu()
     if (!enteredWorkspace && needsWelcome({ loggedIn: state.loggedIn, hasApiKey: state.hasApiKey })) {
@@ -1601,13 +1666,17 @@ async function main(): Promise<void> {
     updateSchedule.dispose()
     updateDialog.dispose()
     mandatoryUI?.dispose()
+    // Boot leases close first so a renderer booting during shutdown cannot retain a bundle generation from a
+    // Host that is about to stop. Every cleanup is caught individually: one failure must not cut the rest short.
     void sweepBootLeases().then(() => Promise.all([
-      Promise.resolve(mandatoryPolicy?.dispose()).then(() => policyAuth?.dispose()),
-      backend.close(),
-      // A Platform cleanup failure is logged without cutting the remaining Host shutdown short.
-      platformView.dispose().catch((error: unknown) => { console.error(error) }),
-      disposeFileDrag().catch((error: unknown) => { console.error(error) }),
-    ]))
+      stopOperationReports(), Promise.resolve(mandatoryPolicy?.dispose()).then(() => policyAuth?.dispose()),
+      backend.close().then(async () => { await operationJournal?.drain(500) }, async (error: unknown) => {
+        await operationJournal?.drain(500)
+        throw error
+      }),
+      platformView.dispose(),
+      disposeFileDrag(),
+    ].map(cleanup => cleanup.catch((error: unknown) => { console.error(error) }))))
       .catch((error: unknown) => { console.error(error) }).finally(() => { app.quit() })
   }
   app.on('before-quit', (event) => {
@@ -1697,7 +1766,9 @@ if (ownsDesktopInstance) void app.whenReady().then(main).catch(async (error: unk
     await writeFile(diagnosticFile, `${error instanceof Error ? error.stack ?? message : message}\n`).catch(() => undefined)
   }
   reportFatal(error, 'main')
-}).catch((error: unknown) => {
+}).catch(async (error: unknown) => {
   console.error(error)
+  shuttingDown = true
+  await stopOperationReports()
   app.exit(1)
 })
