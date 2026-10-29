@@ -210,12 +210,22 @@ export class DesktopBootJournal {
     const record = value as Record<string, unknown>
     if (record.version !== 1 || typeof record.fingerprint !== 'string' || typeof record.firstFailureAt !== 'string'
       || typeof record.lastFailureAt !== 'string' || typeof record.rollbackApplied !== 'boolean'
-      || !Number.isSafeInteger(record.failures) || (record.failures as number) < 0
+      || typeof record.failures !== 'number' || !Number.isSafeInteger(record.failures) || record.failures < 0
       || (record.kind !== 'address-in-use' && record.kind !== 'composition')) {
       console.warn('desktop boot journal: the record is not a version 1 boot failure and is ignored')
       return undefined
     }
-    return record as unknown as BootFailureRecord
+    // Rebuilt from the narrowed fields rather than asserted: every value above is proven, so the record cannot
+    // carry a shape this guard did not establish.
+    return {
+      version: record.version,
+      fingerprint: record.fingerprint,
+      failures: record.failures,
+      kind: record.kind,
+      firstFailureAt: record.firstFailureAt,
+      lastFailureAt: record.lastFailureAt,
+      rollbackApplied: record.rollbackApplied,
+    }
   }
 
   /** Replace the record; the caller observes either the previous or the new complete record. */
