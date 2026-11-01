@@ -413,10 +413,11 @@ describe('native review request', () => {
       provider: 'review',
       model: 'same-model',
       system: EXPECTED_REVIEW_POLICY,
+      sessionId: session.id,
+      purpose: 'auto-review',
     })
     // The field must stay absent. A provider that rejects it fails the review and denies the tool body.
     expect(request).not.toHaveProperty('temperature')
-    expect(request).not.toHaveProperty('sessionId')
     expect(request.maxTokens).toBeUndefined()
     expect(request.tools).toBeUndefined()
     for (const message of request.messages) {
@@ -1497,17 +1498,23 @@ describe('cancellation and integration teardown', () => {
       const probe = registerProbe(ctx)
       const session = sessions.prepare(SessionId(`shutdown-${outcome}`), { meta: { cwd: '/workspace' } })
       const events: SessionEvent[] = []
-      ctx.effect(function* () {
-        const detach = sessions.enter(session)
-        yield () => {
-          detach()
-          detached.resolve(undefined)
-        }
-        yield ctx.on('session/event', (subject, event) => {
-          if (subject === session) events.push(event)
-        })
-        sessions.announce(session)
-        yield () => releaseSession.promise
+      // A dependent of a root-provided service unloads with Auto, before the root's own effects.
+      await ctx.plugin({
+        inject: ['workingDirectory'],
+        apply: (scope: Context) => {
+          scope.effect(function* () {
+            const detach = sessions.enter(session)
+            yield () => {
+              detach()
+              detached.resolve(undefined)
+            }
+            yield scope.on('session/event', (subject, event) => {
+              if (subject === session) events.push(event)
+            })
+            sessions.announce(session)
+            yield () => releaseSession.promise
+          })
+        },
       })
       ctx.permissionPresets.set(session, AUTO_PRESET)
       const agent = agentFor(session)

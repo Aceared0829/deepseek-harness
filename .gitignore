@@ -61,3 +61,6 @@ harness-evidence-export*.jsonl
 # emits one). No such file is tracked.
 /vendor/*/src/**/*.js
 /packages/*/*/src/**/*.js
+
+# Generated company-signed CUA release record.
+/packages/experimental/cua-macos/cua-helper.json
