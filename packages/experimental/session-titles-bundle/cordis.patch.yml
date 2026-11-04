@@ -8,5 +8,10 @@
         targetWords: 5
         targetCjkCharacters: 10
         maxInputBytes: 4096
-        maxOutputTokens: 64
+        # A ceiling against runaway output, not a length target: the prompt
+        # keeps titles short, while reasoning a model cannot switch off also
+        # counts as output. 64 tokens starved reasoning models, whose whole
+        # budget went to reasoning and left no title text (the session stayed
+        # on its fallback name).
+        maxOutputTokens: 4096
         timeoutMs: 60000
