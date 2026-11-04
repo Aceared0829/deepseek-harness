@@ -63,10 +63,12 @@ function pkg(
   return join(dir, 'package.json')
 }
 
-function conditionalPkg(dir: string, name: string, importMarker: number, requireMarker: number): string {
+function conditionalPkg(
+  dir: string, name: string, importMarker: number, requireMarker: number, version = '1.0.0',
+): string {
   file(join(dir, 'package.json'), JSON.stringify({
     name,
-    version: '1.0.0',
+    version,
     type: 'module',
     exports: { custom: './custom.cjs', import: './import.js', require: './require.cjs' },
   }))
@@ -558,6 +560,47 @@ describe('runtime resolution', { concurrent: false }, () => {
     const parent = pathToFileURL(join(f.profile.dir, 'entry.mjs')).href
     expect(resolveFrom('@deepseek-ai/dsh-core', parent)).toBe(
       pathToFileURL(join(f.profile.dir, 'node_modules', '@deepseek-ai/dsh-core', 'index.js')).href,
+    )
+  })
+
+  it.each(['declared', 'hoisted'] as const)(
+    'prefers the installation over an identically versioned %s profile copy',
+    async (origin) => {
+      const f = fixture()
+      if (origin === 'declared') {
+        file(join(f.profile.dir, 'package.json'), JSON.stringify({
+          name: 'dsh-profile-web', private: true, dependencies: { '@deepseek-ai/dsh-core': '*' },
+        }))
+      }
+      pkg(join(f.profile.dir, 'node_modules', '@deepseek-ai/dsh-core'), '@deepseek-ai/dsh-core', 1)
+      const resolution = await resolutionOf(f)
+      expect(resolution.localPackageNames).toEqual(origin === 'declared' ? ['@deepseek-ai/dsh-core'] : [])
+      const registration = installRuntimeInterception(resolution)
+      registrations.push(registration)
+      const require = createRequire(join(f.profile.dir, 'entry.cjs'))
+      expect(require.resolve('@deepseek-ai/dsh-core')).toBe(join(f.installed, 'index.cjs'))
+      const parent = pathToFileURL(join(f.profile.dir, 'entry.mjs')).href
+      expect(resolveFrom('@deepseek-ai/dsh-core', parent)).toBe(
+        pathToFileURL(join(f.installed, 'index.js')).href,
+      )
+      expect(registration.packageDir('@deepseek-ai/dsh-core', parent)).toBe(f.installed)
+    },
+  )
+
+  it('keeps a nearer different-version copy ahead of an identically versioned duplicate farther out', async () => {
+    const f = fixture()
+    const plugin = join(f.profile.dir, 'node_modules', 'my-plugin')
+    pkg(plugin, 'my-plugin', 0)
+    pkg(join(plugin, 'node_modules', '@deepseek-ai/dsh-core'), '@deepseek-ai/dsh-core', 2)
+    pkg(join(f.profile.dir, 'node_modules', '@deepseek-ai/dsh-core'), '@deepseek-ai/dsh-core', 1)
+    const registration = installRuntimeInterception(await resolutionOf(f))
+    registrations.push(registration)
+    const parent = pathToFileURL(join(plugin, 'entry.mjs')).href
+    expect(resolveFrom('@deepseek-ai/dsh-core', parent)).toBe(
+      pathToFileURL(join(plugin, 'node_modules', '@deepseek-ai/dsh-core', 'index.js')).href,
+    )
+    expect(resolveFrom('@deepseek-ai/dsh-core', pathToFileURL(join(f.profile.dir, 'entry.mjs')).href)).toBe(
+      pathToFileURL(join(f.installed, 'index.js')).href,
     )
   })
 
@@ -1359,7 +1402,8 @@ describe('runtime resolution', { concurrent: false }, () => {
     const f = fixture('conditional-lib')
     conditionalPkg(f.installed, 'conditional-lib', 11, 12)
     const local = join(f.profile.dir, 'node_modules', 'conditional-lib')
-    conditionalPkg(local, 'conditional-lib', 21, 22)
+    // A newer local copy is a deliberate override; the identical-version duplicate is covered separately.
+    conditionalPkg(local, 'conditional-lib', 21, 22, '2.0.0')
     const registration = installRuntimeInterception(await resolutionOf(f))
     registrations.push(registration)
     expect(await importFrom('conditional-lib', pathToFileURL(join(f.profile.dir, 'entry.mjs')).href))

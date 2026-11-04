@@ -290,6 +290,17 @@ function localPackageCandidate(searchPath: string, name: string, flavor: 'esm' |
   return found ? candidate : undefined
 }
 
+/** The version a local package directory declares; undefined when it has no readable manifest version. */
+function localPackageVersion(directory: string): string | undefined {
+  try {
+    const manifest = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8')) as { version?: unknown }
+    return typeof manifest.version === 'string' ? manifest.version : undefined
+  } catch (_error) {
+    // A manifestless local package keeps its native resolution (including Node's own diagnostic).
+    return undefined
+  }
+}
+
 function selfReferenceName(parent: string): string | false | null {
   let current = dirname(parent)
   while (true) {
@@ -588,11 +599,25 @@ class ResolutionRouter {
     const target = resolution.entries.get(name)
     const candidates: string[] = []
     const localSearchPaths: string[] = []
+    let nearestPackageDir: string | undefined
     for (const searchPath of createRequire(parent).resolve.paths(name) as string[]) {
       if (!searchPath.startsWith(layer.localPrefix)) break
       localSearchPaths.push(searchPath)
       const candidate = localPackageCandidate(searchPath, name, flavor)
-      if (candidate !== undefined) candidates.push(candidate)
+      if (candidate !== undefined) {
+        candidates.push(candidate)
+        nearestPackageDir ??= join(searchPath, name)
+      }
+    }
+    // A profile copy of the same installation package and version duplicates the runtime's own module: the two
+    // copies carry separate module-private identities (service classes, scope keys, context-tag symbols), so scoped
+    // registrations and singleton state silently split between them. The installation answers instead; the nearest
+    // copy at another version stays a deliberate override.
+    if (nearestPackageDir !== undefined && target?.scope === 'installation' && target.version !== undefined
+      && localPackageVersion(nearestPackageDir) === target.version) {
+      const state: ResolutionRouteState = { route: { kind: 'interception', entry: target, after: layer.after } }
+      if (memo) requests.set(request, state)
+      return state
     }
     if (candidates.length > 0) {
       if (cjs !== undefined) {
@@ -680,6 +705,9 @@ class ResolutionRouter {
     const name = barePackageName(request)
     const { layer } = parentRoutes
     if (name === undefined || layer.kind !== 'profile' || !layer.active || !resolution.localPackageNames.has(name)) return undefined
+    // An installation-owned package is decided by routeScoped instead: the importer's nearest profile copy at another
+    // version wins there, while an identically versioned duplicate falls back to the installation.
+    if (resolution.entries.get(name)?.scope === 'installation') return undefined
     const state = { route: { kind: 'native' as const } }
     parentRoutes.requests.set(request, state)
     return state
