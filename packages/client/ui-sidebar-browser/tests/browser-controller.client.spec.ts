@@ -22,11 +22,11 @@ function lifetime(): AbortController {
   return controller
 }
 
-function harness() {
+function harness(homeUrl = '') {
   const id = `browser-controller-test-${String(++sequence)}`
   const store = createBrowserStore().create(id)
   let open = true
-  const face = createBrowserControllers(store.actions, createIframePage, () => open)
+  const face = createBrowserControllers(store.actions, createIframePage, () => open, homeUrl)
   disposables.push(face)
   const host = document.createElement('div')
   host.id = id
@@ -41,7 +41,7 @@ function harness() {
     if (element === null) throw new Error('expected a mounted iframe')
     return element
   }
-  return { store, face, mount, iframe, close: () => { open = false } }
+  return { store, face, mount, iframe, hostId: id, close: () => { open = false } }
 }
 
 afterEach(async () => {
@@ -54,6 +54,30 @@ afterEach(async () => {
 })
 
 describe('BrowserController', () => {
+  it('opens the configured home address in a tab with no saved page or explicit URL', () => {
+    const h = harness('https://home.example/start')
+    const tabLifetime = lifetime()
+    h.mount(tabLifetime.signal)
+    expect(h.iframe().src).toBe('https://home.example/start')
+    expect(h.store.getSnapshot().byTab[TAB]?.entries.at(-1)?.url).toBe('https://home.example/start')
+  })
+
+  it('prefers an explicit initial URL over the configured home address', () => {
+    const explicit = harness('https://home.example/start')
+    const tabLifetime = lifetime()
+    explicit.face.mount({ tabId: TAB, signal: tabLifetime.signal, viewportId: explicit.hostId,
+      applicationOrigin: APP, initial: undefined, initialUrl: 'https://typed.example/', openTab: vi.fn() })
+    const host = document.getElementById(explicit.hostId)
+    expect(host?.querySelector('iframe')?.src).toBe('https://typed.example/')
+  })
+
+  it('keeps the start placeholder without a configured home address', () => {
+    const blank = harness('')
+    const tabLifetime = lifetime()
+    blank.mount(tabLifetime.signal)
+    expect(document.getElementById(blank.hostId)?.querySelector('iframe')).toBeNull()
+  })
+
   it('restores only on request and redirects saved checkpoints to a replacement binding', () => {
     const h = harness()
     const saved = browserAddressCheckpoint({ kind: 'https', url: 'https://saved.example/', title: 'Saved page' }, 2)
@@ -117,7 +141,7 @@ describe('BrowserController', () => {
     const store = createBrowserStore().create('provider-callbacks')
     const openTab = vi.fn()
     const controller = new BrowserController({ tabId: TAB, signal: lifetime().signal, applicationOrigin: APP,
-      actions: store.actions, initial: saved, createPage: pageFactory, openTab })
+      actions: store.actions, initial: saved, createPage: pageFactory, openTab, homeUrl: '' })
     disposables.push(controller)
     const provider = callbacks[0]!
     provider.openRequested('file:/secret')
@@ -144,7 +168,7 @@ describe('BrowserController', () => {
     const tabLifetime = lifetime()
     const controller = new BrowserController({
       tabId: TAB, signal: tabLifetime.signal, applicationOrigin: APP, actions: store.actions,
-      initial: undefined, createPage: createIframePage, openTab: vi.fn(),
+      initial: undefined, createPage: createIframePage, openTab: vi.fn(), homeUrl: '',
     })
     disposables.push(controller)
     tabLifetime.abort()

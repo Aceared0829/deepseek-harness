@@ -7,11 +7,13 @@
   },
   "include": [
     "src/client",
+    "src/config.ts",
     "src/types.ts",
     "src/css-modules.d.ts"
   ],
   "references": [
     { "path": "../../../vendor/cordis" },
+    { "path": "../../../vendor/schemastery" },
     { "path": "../../api/workspace-controller/tsconfig.client.json" },
     { "path": "../../util/brand" },
     { "path": "../locale/tsconfig.client.json" },

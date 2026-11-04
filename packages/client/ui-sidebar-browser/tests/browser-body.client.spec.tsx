@@ -38,12 +38,12 @@ const absentState = {
 }
 
 function mountBrowser(navigation?: { readonly url?: string },
-  options: { initial?: BrowserTabState; createPage?: BrowserPageFactory; refreshShortcut?: ReturnType<BrowserBodyProps['useTabInfo']>['tab']['refreshShortcut'] } = {}) {
+  options: { initial?: BrowserTabState; createPage?: BrowserPageFactory; homeUrl?: string; refreshShortcut?: ReturnType<BrowserBodyProps['useTabInfo']>['tab']['refreshShortcut'] } = {}) {
   const store = createBrowserStore().create(`browser-body-test-${String(++mountSequence)}`)
   if (options.initial !== undefined) store.actions.replace(TAB, options.initial)
   const lifetime = new AbortController()
   lifetimes.add(lifetime)
-  const injected = createBrowserControllers(store.actions, options.createPage ?? createIframePage, () => true)
+  const injected = createBrowserControllers(store.actions, options.createPage ?? createIframePage, () => true, options.homeUrl ?? '')
   controllers.push(injected)
   const { keyedHooks, ...commands } = injected
   const tabActions = { bindCommands: vi.fn<ReturnType<BrowserBodyProps['useTabInfo']>['tab']['actions']['bindCommands']>(() => vi.fn()), openResource: vi.fn(), openTab: vi.fn(), close: vi.fn() }
@@ -262,6 +262,18 @@ describe('BrowserBody', () => {
     const input = mounted.view.getByRole('textbox')
     await waitFor(() => { expect(mounted.view.getByRole('alert').textContent).toBe(zh['error.protocol']) })
     expect(input).toHaveProperty('value', 'file:/work/index.html')
+    expect(mounted.view.container.querySelector('iframe')).toBeNull()
+  })
+
+  it('loads the configured home address in a new tab', async () => {
+    const mounted = mountBrowser(undefined, { homeUrl: 'https://home.example/start' })
+    await waitFor(() => { expect(mounted.view.container.querySelector('iframe')?.getAttribute('src')).toBe('https://home.example/start') })
+    expect(mounted.view.getByRole('textbox')).toHaveProperty('value', 'https://home.example/start')
+  })
+
+  it('shows the start placeholder when no home address is configured', () => {
+    const mounted = mountBrowser()
+    expect(mounted.view.getByText(zh.start)).toBeDefined()
     expect(mounted.view.container.querySelector('iframe')).toBeNull()
   })
 
