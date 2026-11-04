@@ -49,6 +49,16 @@ describe('localPathMediaUrl', () => {
     expect(new URL(localPathMediaUrl(BASE, 'C:\\tmp\\x.png')!).searchParams.get('path')).toBe('C:\\tmp\\x.png')
   })
 
+  it('anchors a Workspace-relative destination on the Session root', () => {
+    expect(new URL(localPathMediaUrl(BASE, 'docs/graph.png', '/work')!).searchParams.get('path'))
+      .toBe('/work/docs/graph.png')
+    expect(new URL(localPathMediaUrl(BASE, 'graph.png', 'C:\\work')!).searchParams.get('path'))
+      .toBe('C:\\work\\graph.png')
+    // An absolute destination ignores the root, exactly like Chat fileImages.
+    expect(new URL(localPathMediaUrl(BASE, '/tmp/graph.png', '/work')!).searchParams.get('path'))
+      .toBe('/tmp/graph.png')
+  })
+
   it('encodes the full path including spaces', () => {
     expect(localPathMediaUrl(BASE, '/tmp/my graph.png'))
       .toBe(`${BASE}api/file?path=${encodeURIComponent('/tmp/my graph.png')}`)
@@ -87,6 +97,48 @@ describe('AssistantMarkdown local-path images', () => {
     )
     expect(container.querySelector('img')).toBeNull()
     expect(container.textContent).toContain('diagram')
+  })
+
+  it('anchors a Workspace-relative image on the Session root', () => {
+    vi.spyOn(document, 'baseURI', 'get').mockReturnValue(BASE)
+    const { container } = render(
+      <AssistantMarkdown renderSlot={() => null} useDisclosure={useDisclosure} useGroupAction={useSearchableHidden}
+        usePresentation={useDetailedPresentation}
+        blocks={[textBlock('See ![diagram](charts/graph.png).')]}
+        streaming={false}
+        loadImage={unusedImageLoader}
+        cwd="/work"
+        t={t}
+      />,
+    )
+    const image = container.querySelector('img')
+    expect(image?.getAttribute('alt')).toBe('diagram')
+    expect(new URL(image?.getAttribute('src') ?? '').searchParams.get('path')).toBe('/work/charts/graph.png')
+  })
+
+  /**
+   * The authored text of a real Session: a Windows destination inside `<...>`
+   * whose `\.` Markdown reads as a punctuation escape. Losing that separator
+   * made the file route answer 404, so the image only ever rendered alt text.
+   */
+  it.each([
+    ['single separators', String.raw`![ZCode 主界面](<D:\RSIHarness\.probe\zc_main.png>)`],
+    ['doubled separators', String.raw`![ZCode 主界面](<D:\\RSIHarness\\.probe\\zc_main.png>)`],
+  ])('keeps every Windows separator in a %s destination', (_name, authored) => {
+    vi.spyOn(document, 'baseURI', 'get').mockReturnValue(BASE)
+    const { container } = render(
+      <AssistantMarkdown renderSlot={() => null} useDisclosure={useDisclosure} useGroupAction={useSearchableHidden}
+        usePresentation={useDetailedPresentation}
+        blocks={[textBlock(`See ${authored} above.`)]}
+        streaming={false}
+        loadImage={unusedImageLoader}
+        t={t}
+      />,
+    )
+    const image = container.querySelector('img')
+    expect(image?.getAttribute('alt')).toBe('ZCode 主界面')
+    expect(new URL(image?.getAttribute('src') ?? '').searchParams.get('path'))
+      .toBe(String.raw`D:\RSIHarness\.probe\zc_main.png`)
   })
 })
 
