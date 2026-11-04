@@ -42,7 +42,7 @@
 
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { zstdDecompressSync } from 'node:zlib'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 
@@ -489,8 +489,14 @@ async function main(argv) {
       // The helper may hand back the wire payload so the transport rule still
       // applies; without it the transport stage simply did not run.
       if (outcome.view !== undefined) {
-        const drift = firstDivergence(outcome.view, JSON.parse(JSON.stringify(outcome.view)))
-        if (drift !== undefined) fail(state, `${input}: view changes through JSON at ${drift}`)
+        const serialized = JSON.stringify(outcome.view)
+        // A helper can return a value JSON cannot represent; that is a failed
+        // transport check, not a reason for the gate itself to crash.
+        if (serialized === undefined) fail(state, `${input}: view is not serializable`)
+        else {
+          const drift = firstDivergence(outcome.view, JSON.parse(serialized))
+          if (drift !== undefined) fail(state, `${input}: view changes through JSON at ${drift}`)
+        }
       }
       reviewed += 1
       if (typeof outcome.render !== 'function') {
@@ -708,7 +714,8 @@ function listInputs(directory) {
         } catch {
           continue
         }
-        if (!inside.startsWith(realRoot)) continue
+        // Compare whole path segments: `/root-other` shares a prefix with `/root` but is outside it.
+        if (inside !== realRoot && !inside.startsWith(realRoot + sep)) continue
         found.push(...walk(path))
       } else {
         found.push(path)
@@ -831,9 +838,9 @@ function zstdFrameEnd(buffer, start) {
     const type = (header >> 1) & 3
     const size = header >> 3
     if (type === 3) throw new Error(`reserved Zstandard block type at byte ${offset - 3}`)
-    // Both raw and RLE blocks advance by `size`; a compressed block's bytes are
-    // never larger than its declared size.
-    offset += size
+    // A raw or compressed block occupies exactly `size` bytes on the wire. An
+    // RLE block stores one byte however large its decompressed size is.
+    offset += type === 1 ? 1 : size
     if (offset > buffer.length) return undefined
     if (last) break
   }

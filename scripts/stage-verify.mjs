@@ -22,7 +22,7 @@
  *   --port <n>       port for the staged instance (default: OS-assigned)
  *   --timeout <s>    boot timeout (default 90)
  *   --keep           keep the staging directory and log on success too
- *   --open           open the staged instance in a browser
+ *   --open           open the staged instance in a browser and keep it up until Ctrl-C
  */
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
@@ -497,7 +497,13 @@ async function main() {
         : process.platform === 'darwin' ? ['open', [probeUrl]] : ['xdg-open', [probeUrl]]
       spawnSync(command[0], command[1], { windowsHide: true, stdio: 'ignore' })
       console.log(`\n  open  ${new URL(probeUrl).origin}  (fresh home: no credentials, log in there to interact)`)
-      await sleep(1500)
+      console.log('  The staged instance stays up while this command runs; press Ctrl-C to stop it.')
+      // Hold the instance open for the person using it; the finally stops it on the way out.
+      await new Promise((done) => {
+        const signals = ['SIGINT', 'SIGTERM', 'SIGHUP']
+        const stop = () => { for (const signal of signals) process.off(signal, stop); done() }
+        for (const signal of signals) process.once(signal, stop)
+      })
     }
   } finally {
     await stopChild(child)
