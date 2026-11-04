@@ -1,0 +1,71 @@
+packages:
+  - .
+
+nodeLinker: hoisted
+autoInstallPeers: false
+minimumReleaseAgeExclude:
+  - dsh-plugin-marketplace@0.4.1
+  - '@linxin666/dsh-client-ui-task-board-github@0.4.5'
+  - dsh-diff-approval@0.35.0
+  - '@goodandready/dsh-time-machine@0.1.29'
+  - '@goodandready/dsh-plugin-notify@0.4.4'
+  - '@linxin666/dsh-pet@0.4.7'
+  - dsh-context@0.73.1 || 0.73.2 || 0.73.3 || 0.75.1 || 0.77.0
+  - dsh-connect-workbuddy@4.8.2 || 4.10.0 || 4.12.0 || 4.13.2 || 4.14.1
+  - '@modusensus/dsh-mneme@0.9.1'
+  - open-sea-skin@1.2.6
+  - billion-context@0.1.204 || 0.1.206
+  - '@changfenhuang/dsh-genui@0.14.0'
+  - ds-bot@0.2.1 || 0.2.2
+  - '@deepseek-ai/dsh-brand@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-timeout@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-typert-protocol@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-util-values@0.2.1-rc.3'
+  - dsh-claude-style@0.19.0 || 0.19.2 || 0.19.3
+  - '@deepseek-ai/dsh-app-boot@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-atomic-write@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-client-ui-plugin-market@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-experimental-agent-team-profile@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-experimental-agent-team@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-experimental-api-speech-to-text@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-experimental-auto-review@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-experimental-badge-skill-bundle@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-experimental-client-ui-agent-team@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-experimental-client-ui-cot-translation@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-experimental-client-ui-voice-input@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-experimental-cot-translation-bundle@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-experimental-inspector-profile@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-experimental-inspector@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-experimental-plugin-market-bundle@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-experimental-ralph-bundle@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-experimental-session-inspector@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-experimental-session-search@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-experimental-session-titles-bundle@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-experimental-speech-to-text-sensevoice@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-experimental-speech-to-text@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-experimental-terminal-bundle@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-experimental-tool-agent-team@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-experimental-tool-worktree@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-experimental-translator@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-experimental-voice-input-bundle@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-experimental-worktree@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-lazy-require@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-package-manifest@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-plugin-market-index@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-plugin-market@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-pwsh-local@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-session-query-sqlite@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-session-title-all-prompts-llm@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-skill-badge@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-terminal-bash@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-terminal@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-tool-ralph@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-tool-session-query@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-tool-terminal@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-util-crypto@0.2.1-rc.3'
+  - '@deepseek-ai/dsh-workflow-ptc@0.2.1-rc.3'
+  - '@michengai/dsh-skills-manager@1.2.18'
+  - '@linxin666/dsh-session-archive@0.4.9'
+allowBuilds:
+  cpu-features: true
+  ssh2: true
