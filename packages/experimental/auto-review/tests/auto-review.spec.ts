@@ -413,10 +413,11 @@ describe('native review request', () => {
       provider: 'review',
       model: 'same-model',
       system: EXPECTED_REVIEW_POLICY,
-      temperature: 0,
       sessionId: session.id,
       purpose: 'auto-review',
     })
+    // The field must stay absent. A provider that rejects it fails the review and denies the tool body.
+    expect(request).not.toHaveProperty('temperature')
     expect(request.maxTokens).toBeUndefined()
     expect(request.tools).toBeUndefined()
     for (const message of request.messages) {
