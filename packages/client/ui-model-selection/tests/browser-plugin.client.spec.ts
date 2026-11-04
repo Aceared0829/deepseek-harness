@@ -227,6 +227,21 @@ describe('ui-model-selection dual entry', () => {
     expect(b.seat().locale).toBe('model')
   })
 
+  it('resolves a model directory from a dependent plugin without injecting remote.session', async () => {
+    const b = await bench()
+    b.mint('owned')
+    let matched = false
+    const fiber = b.ctx.plugin({
+      inject: ['modelDirectories'],
+      apply(scope) {
+        const directory = scope.modelDirectories.directoryFor(sid('owned'))
+        matched = directory === b.ctx.modelDirectories.directoryFor(sid('owned'))
+      },
+    })
+    await expect(fiber.await()).resolves.toBeDefined()
+    expect(matched).toBe(true)
+  })
+
   it.each([['zh', '新'], ['en', 'New']] as const)('resolves seat badge text for the active %s locale', async (locale, expected) => {
     const b = await bench(locale)
     b.mint('s1')
