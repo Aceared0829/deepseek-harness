@@ -614,7 +614,7 @@ async function main(): Promise<void> {
   const platformView = new DesktopPlatformView(join(app.getAppPath(), 'lib', 'preload-platform-account.cjs'),
     () => locale.id === 'zh-CN' ? 'zh_CN' : 'en_US', process.platform === 'win32' ? 'win32' : 'darwin',
     owner => isMandatory() || updateOverlays.input(owner).blocked)
-  /** Liveness probe cadence; `0` (the default) leaves the running Host unprobed. */
+  /** Liveness probe cadence; defaults to 30 000 ms, and `0` leaves the running Host unprobed. */
   const livenessIntervalMs = resolveLivenessInterval(process.env)
   /** Time one liveness probe waits for an answer before counting as missed. */
   const probeDeadlineMs = resolveProbeDeadline(process.env)
@@ -889,10 +889,17 @@ async function main(): Promise<void> {
     startup ??= (async () => {
       await navigateMain(applicationUrl)
       let rolledBack: number | undefined
-      await backend.start(async () => {
-        rolledBack = await recoverUnstartableProfile()
-        await Promise.all([manager.applyRelease(), prepareHostEnvironment()])
-      })
+      try {
+        await backend.start(async () => {
+          rolledBack = await recoverUnstartableProfile()
+          await Promise.all([manager.applyRelease(), prepareHostEnvironment()])
+        })
+      } catch (error) {
+        // Only a launch that never reached readiness is evidence against the profile composition; errors after
+        // `start()` resolves (window creation, navigation) must not count toward rolling the profile back.
+        if (!isQuitting()) bootJournal.recordFailure(error)
+        throw error
+      }
       // Reachability is only established here: the Host has answered with its Web URL.
       bootJournal.markReady()
       if (backend.host !== undefined) await openInitialWindow()
@@ -909,9 +916,8 @@ async function main(): Promise<void> {
       }
       // The existing Web document resumes through the boot IPC response.
     })().catch((error: unknown) => {
-      // Every path that ends startup without readiness lands here, including a Host that never reported and the
-      // directory a rollback could not save. A later successful launch clears the record again.
-      if (!isQuitting()) bootJournal.recordFailure(error)
+      // Every path that ends startup without readiness lands here; only the Host never reaching readiness was
+      // recorded above as evidence against the composition.
       updateJournal?.action('workspace-failed')
       reportFatal(error, 'main')
       throw error

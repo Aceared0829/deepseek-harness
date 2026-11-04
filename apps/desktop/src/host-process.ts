@@ -89,6 +89,12 @@ export const HOST_READY_TIMEOUT_MS = 120_000
 const MAX_HOST_DIAGNOSTIC_CHARS = 64 * 1024
 const runIdSchema = z.uuid()
 
+/** The Host answered a control request, but the reply carried an error instead of the requested result. */
+class DesktopHostControlRefusalError extends Error {}
+
+/** The measurement reported when the Host answered a probe without one; it recorded nothing in the window. */
+const NO_DELAY: DesktopEventLoopDelay = { observedMs: 0, samples: 0, p50Ms: 0, p99Ms: 0, maxMs: 0 }
+
 /** Whether a control reply carries a delay measurement this shell can report. */
 function isEventLoopDelay(value: unknown): value is DesktopEventLoopDelay {
   if (typeof value !== 'object' || value === null) return false
@@ -331,7 +337,7 @@ export class DesktopHostProcess {
       else {
         const request = this.controlRequests.get(message.requestId)
         if (message.error === undefined) request?.resolve(message)
-        else request?.reject(new Error(message.error))
+        else request?.reject(new DesktopHostControlRefusalError(message.error))
       }
     })
     child.once('error', (error) => { this.fail(error) })
@@ -364,6 +370,8 @@ export class DesktopHostProcess {
     } catch (error) {
       // The child can finish exiting between the check above and this answer.
       if (this.unavailable()) return undefined
+      // A reply that carried an error still proves the loop runs; only silence means unresponsive.
+      if (error instanceof DesktopHostControlRefusalError) return NO_DELAY
       console.warn('desktop liveness: Host did not answer a probe', error)
       return undefined
     }
