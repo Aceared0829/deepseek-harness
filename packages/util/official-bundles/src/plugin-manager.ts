@@ -1,5 +1,7 @@
 /** The package names the plugin manager protects, hides, orders, or marks experimental. */
 
+import { RETIRED_BUNDLES } from './bundles.ts'
+
 /**
  * Plugin packages the plugin manager refuses to disable or remove, because management itself needs them; a bundle that
  * contains one is read-only as well. Removing a name drops only this `management-required` refusal; the manager's own
@@ -19,7 +21,9 @@ export const PROTECTED_PLUGINS: ReadonlySet<string> = new Set([
 
 /**
  * Built-in profile bundles, persistent terminals, and the standalone worktree tool, which have no plugin manager page.
- * Their Host availability and activation stay intact.
+ * Their Host availability and activation stay intact. Retired bundles join them: app-boot strips one from every
+ * profile selection on load ({@link RETIRED_BUNDLES}), so a switch for a leftover installation could only write a
+ * selection the next recomposition removes again and would read as enabled and then silently revert.
  */
 export const HIDDEN_BUNDLES: ReadonlySet<string> = new Set([
   '@deepseek-ai/dsh-base',
@@ -30,6 +34,7 @@ export const HIDDEN_BUNDLES: ReadonlySet<string> = new Set([
   '@deepseek-ai/dsh-sdk-minimal',
   '@deepseek-ai/dsh-experimental-terminal-bundle',
   '@deepseek-ai/dsh-experimental-tool-worktree',
+  ...RETIRED_BUNDLES,
 ])
 
 /**

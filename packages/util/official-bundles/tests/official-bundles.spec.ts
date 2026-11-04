@@ -1,7 +1,9 @@
 /** Shipped profile templates, and the offline catalog that does not depend on installed provider packages or registry requests. */
 
 import { describe, expect, it } from 'vitest'
-import { OFFICIAL_ON_DEMAND_CATALOG, ON_DEMAND_BUNDLES, PROFILE_TEMPLATES } from '../src/index.ts'
+import {
+  HIDDEN_BUNDLES, OFFICIAL_ON_DEMAND_CATALOG, ON_DEMAND_BUNDLES, PROFILE_TEMPLATES, RETIRED_BUNDLES,
+} from '../src/index.ts'
 
 describe('Official on-demand catalog', () => {
   it('offers exactly the two native subagent integrations with offline localized metadata', () => {
@@ -16,6 +18,13 @@ describe('Official on-demand catalog', () => {
       }
       expect(entry).not.toHaveProperty('version')
     }
+  })
+})
+
+describe('Plugin manager lists', () => {
+  it('hides every retired bundle, whose selection app-boot strips again on load', () => {
+    expect(RETIRED_BUNDLES.size).toBeGreaterThan(0)
+    for (const name of RETIRED_BUNDLES) expect(HIDDEN_BUNDLES.has(name), name).toBe(true)
   })
 })
 
