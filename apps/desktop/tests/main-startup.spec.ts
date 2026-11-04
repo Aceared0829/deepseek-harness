@@ -2,7 +2,7 @@ import { parsePluginOperationRecord } from '@deepseek-ai/dsh-plugin-manager/diag
 import type { DesktopHostProcess } from '../src/host-process.ts'
 import type { AccountView } from '@deepseek-ai/dsh-deepseek-account/types'
 import { WINDOWS_TITLEBAR_HEIGHT } from '../src/windows-layout.ts'
-import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
+import { afterAll, afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { IpcMainInvokeEvent } from 'electron'
 import { join } from 'node:path'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -10,14 +10,17 @@ import { tmpdir } from 'node:os'
 import type { MenuItemConstructorOptions, MessageBoxOptions } from 'electron'
 import { DESKTOP_IPC, type DesktopUpdateState } from '../src/ipc.ts'
 import { MANDATORY_IPC } from '../src/mandatory-update-ipc.ts'
-import { DesktopHostFatalError, DesktopHostUncleanExitError } from '../src/host-process.ts'
+import { DesktopHostFatalError, DesktopHostUncleanExitError, type DesktopEventLoopDelay } from '../src/host-process.ts'
 import { en, zh } from '../src/locale.ts'
 import { DesktopUpdatePreparationError } from '../src/update-error.ts'
 import { writeCrashReport } from '../src/crash-report.ts'
+import { DEFAULT_BOOT_FAILURE_LIMIT, profileFingerprint, type BootFailureRecord } from '../src/boot-journal.ts'
 import { runOperationReportJob } from '../src/operation-report-job.ts'
 
 type InvokeEvent = { sender?: unknown; senderFrame: { url: string } }
 type InvokeHandler = (event: InvokeEvent, ...args: unknown[]) => unknown
+/** Absolute user-data directory the current test bound; the boot journal lives under it. */
+let bootJournalDirectory: string
 
 const fileDrag = vi.hoisted(() => ({ dispose: vi.fn<() => Promise<void>>(), install: vi.fn() }))
 vi.mock('../src/file-drag.ts', () => ({ installDesktopFileDrag: () => { fileDrag.install(); return fileDrag.dispose } }))
@@ -37,6 +40,9 @@ vi.mock('../src/crash-report.ts', async importOriginal => ({
 
 const harness = await vi.hoisted(async () => {
   const { EventEmitter } = await import('node:events')
+  const nodeFs = await import('node:fs')
+  const nodeOs = await import('node:os')
+  const nodePath = await import('node:path')
   function deferred() {
     let resolve!: () => void
     let reject!: (error: Error) => void
@@ -155,12 +161,19 @@ const harness = await vi.hoisted(async () => {
   class FakeHost {
     readonly updateTasks = vi.fn(async (_action: 'inspect' | 'lock' | 'unlock') => false)
     readonly inspectQuit = vi.fn(async () => ({ activeTasks: false, scheduledTasks: false }))
+    readonly bootInjections = vi.fn(async () => ({ injections: [] as readonly unknown[], lease: 'boot-1' }))
+    readonly releaseBootInjections = vi.fn(async (_lease: string) => {})
+    /** Liveness probe answer; tests set it to false to simulate a Host holding its event loop. */
+    /** Probe answer: the delay the Host reports, or undefined for a Host that did not answer in time. */
+    readonly probe = vi.fn(async (_deadlineMs?: number): Promise<DesktopEventLoopDelay | undefined> => (
+      { observedMs: 1000, samples: 1000, p50Ms: 1, p99Ms: 4, maxMs: 9 }
+    ))
     url = 'http://127.0.0.1:3080/?token=test'
     fetch = vi.fn(async () => Response.json({ hasApiKey: true, writable: true, localePreference: null }))
     readonly ready = deferred()
     readonly exited = deferred()
     readonly stopping = deferred()
-    readonly start = vi.fn(() => { hostStarted.resolve(); return this.ready.promise.then(() => ({ url: this.url, injections: [] })) })
+    readonly start = vi.fn(() => { hostStarted.resolve(); return this.ready.promise.then(() => ({ url: this.url })) })
     readonly stop = vi.fn(() => {
       this.stopping.resolve()
       this.ready.reject(new Error('child stopped'))
@@ -172,7 +185,8 @@ const harness = await vi.hoisted(async () => {
       readonly primaryRuntime?: string,
       readonly packageManager?: { pnpm: string; nodeBin: string },
       readonly onPlatformSession?: ConstructorParameters<typeof DesktopHostProcess>[8],
-      readonly onPluginOperation?: ConstructorParameters<typeof DesktopHostProcess>[9],
+      readonly readyTimeoutMs?: ConstructorParameters<typeof DesktopHostProcess>[9],
+      readonly onPluginOperation?: ConstructorParameters<typeof DesktopHostProcess>[10],
     ) { hosts.push(this) }
   }
   const app = Object.assign(new EventEmitter(), {
@@ -214,7 +228,10 @@ const harness = await vi.hoisted(async () => {
   }
   const backgroundNotice = { close: vi.fn((hide: () => void) => { hide() }), dispose: vi.fn(), markerPath: undefined as string | undefined }
   const shellDialog = { isOpen: false, focus: vi.fn() }
+  // A stable profile directory the boot journal can fingerprint; tests that assert on a composition write its files.
+  const profileDir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'dsh-main-profile-'))
   return {
+    profileDir,
     failWindow(error: Error) { windowFailure = error },
     windows, views, hosts, handlers, app, FakeWindow, FakeView, FakeHost, powerMonitor, nativeTheme, analytics,
     trays, FakeTray, backgroundNotice, shellDialog,
@@ -348,7 +365,7 @@ vi.mock('../src/login-shell-environment.ts', async importOriginal => ({
   readDesktopLoginShellEnvironment: harness.loginShell,
 }))
 vi.mock('../src/runtime-tree.ts', () => ({ readDesktopRuntime: () => ({ release: { version: '1.0.0' } }) }))
-vi.mock('../src/paths.ts', () => ({ resolveDesktopPaths: () => ({ profile: 'desktop-test-profile' }) }))
+vi.mock('../src/paths.ts', () => ({ resolveDesktopPaths: () => ({ profile: harness.profileDir }) }))
 vi.mock('../src/project-manager.ts', () => ({
   DesktopProjectManager: class {
     readonly applyRelease = harness.applyRelease
@@ -430,7 +447,7 @@ function configureTestAuthPopup(allow: boolean): void {
   writeFileSync(join(directory, 'settings.json'), JSON.stringify({ updates: { allowTestAuthPopupWindow: allow } }))
 }
 
-function invoke(channel: string, origin = channel === DESKTOP_IPC.boot ? 'app' : 'shell', ...args: unknown[]): unknown {
+function invoke(channel: string, origin = channel === DESKTOP_IPC.boot || channel === DESKTOP_IPC.bootRelease ? 'app' : 'shell', ...args: unknown[]): unknown {
   const handler = harness.handlers.get(channel)
   if (handler === undefined) throw new Error(`missing handler ${channel}`)
   if (origin === 'app') {
@@ -438,6 +455,11 @@ function invoke(channel: string, origin = channel === DESKTOP_IPC.boot ? 'app' :
     return handler({ sender, senderFrame: sender.mainFrame }, ...args)
   }
   return handler({ senderFrame: { url: `dsh-app://${origin}/index.html` } }, ...args)
+}
+
+function windowDestroyed(window: InstanceType<typeof harness.FakeWindow>): void {
+  window.destroyed = true
+  window.webContents.emit('destroyed')
 }
 
 function applicationMenuItems(): MenuItemConstructorOptions[] {
@@ -458,6 +480,7 @@ beforeEach(() => {
   vi.useFakeTimers()
   harness.reset()
   const userData = mkdtempSync(join(tmpdir(), 'dsh-main-user-data-'))
+  bootJournalDirectory = userData
   onTestFinished(() => { rmSync(userData, { recursive: true, force: true }) })
   harness.app.getPath.mockImplementation(name => name === 'userData' ? userData : join(userData, `desktop-test-${name}`))
   vi.mocked(writeCrashReport).mockResolvedValue(join(harness.app.getPath('logs'), 'crash-test.log'))
@@ -477,6 +500,10 @@ beforeEach(() => {
   vi.stubEnv('DSH_DESKTOP_DEV_PROJECT_DIR', undefined)
   vi.stubEnv('DSH_DESKTOP_MANDATORY_UPDATE_CONFIG', undefined)
   vi.stubEnv('DSH_DESKTOP_UPDATE_JOURNAL_DIR', undefined)
+  vi.stubEnv('DSH_DESKTOP_HOST_LIVENESS_INTERVAL_MS', undefined)
+  vi.stubEnv('DSH_DESKTOP_HOST_PROBE_TIMEOUT_MS', undefined)
+  vi.stubEnv('DSH_DESKTOP_HOST_STALL_PROBES', undefined)
+  vi.stubEnv('DSH_DESKTOP_HOST_STALL_RECOVERIES', undefined)
   vi.stubEnv('DSH_CLIENT_VERSION', '1.2.3')
   harness.analyticsEnabled = true
 })
@@ -495,6 +522,10 @@ afterEach(async () => {
   vi.unstubAllEnvs()
   vi.unstubAllGlobals()
 })
+
+// The profile directory outlives each test on purpose — the journal fingerprints one stable composition — so the
+// file's single copy is removed once the whole spec finishes rather than after every case.
+afterAll(() => { rmSync(harness.profileDir, { recursive: true, force: true }) })
 
 describe('desktop main startup', () => {
   it.each([true, false])('selects the package manager before Host startup (packaged=%s)', async (packaged) => {
@@ -802,7 +833,8 @@ describe('desktop main startup', () => {
     const visible = menu.filter(item => item.visible !== false)
     expect(visible.map(item => item.role === 'quit' ? 'quit' : item.label ?? item.type)).toEqual([
       messages.aboutMenu, 'separator', messages.checkUpdatesMenu,
-      ...platform === 'linux' ? [] : [messages.cliCommandMenu],
+      // This fork hides the command item in an unpackaged build; packaging is its only gate.
+      ...platform === 'linux' || !packaged ? [] : [messages.cliCommandMenu],
       'separator', ...packaged ? [] : [messages.reloadPageMenu, messages.restartAppHostMenu],
       messages.toggleDevToolsMenu, 'separator',
       ...platform === 'darwin' ? [messages.hideApplication, messages.hideOtherApplications, messages.showAllApplications, 'separator'] : [],
@@ -1348,6 +1380,14 @@ describe('desktop main startup', () => {
     expect(harness.menu.setApplicationMenu).toHaveBeenCalledOnce()
   })
 
+  it.each(['darwin', 'win32'] as const)('omits command management from an unpackaged build on %s', async (platform) => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue(platform)
+    harness.app.isPackaged = false
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    expect(applicationMenuItems().map(item => item.label)).not.toContain(en.cliCommandMenu)
+  })
+
   it.each(['en-US', 'zh-CN'])('localizes macOS application commands without changing the application name (%s)', async (locale) => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
     vi.spyOn(harness.app, 'getLocale').mockReturnValue(locale)
@@ -1460,8 +1500,10 @@ describe('desktop main startup', () => {
     await harness.preparing.promise
     const handler = harness.handlers.get(DESKTOP_IPC.boot)!
     await expect(handler({ senderFrame: { url: 'https://other.example/' } })).rejects.toThrow('unowned renderer')
+    const window = harness.windows[0]!
+    const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame }
     let settled = false
-    const boot = Promise.resolve(handler({ senderFrame: { url: 'dsh-app://app/' } })).then((value) => { settled = true; return value })
+    const boot = Promise.resolve(handler(event)).then((value) => { settled = true; return value })
     await Promise.resolve()
     expect(settled).toBe(false)
     expect(harness.windows[0]!.urls).toEqual(['dsh-app://app/'])
@@ -1469,8 +1511,231 @@ describe('desktop main startup', () => {
     await harness.hostStarted.promise
     expect(settled).toBe(false)
     harness.hosts[0]!.ready.resolve()
-    await expect(boot).resolves.toEqual({ injections: [], streamBaseUrl: 'http://127.0.0.1:3080' })
+    await expect(boot).resolves.toEqual({ injections: [], lease: 'boot-1', streamBaseUrl: 'http://127.0.0.1:3080' })
     expect(harness.windows[0]!.urls).toEqual(['dsh-app://app/'])
+  })
+
+  it('reads current boot injections for each request instead of retaining Host readiness', async () => {
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const instance = harness.hosts.at(-1)!
+    instance.bootInjections.mockResolvedValueOnce({
+      injections: [{ kind: 'script-src', placement: 'head', src: '/plugins/??first/client.js&rev=first' }],
+      lease: 'boot-first',
+    }).mockResolvedValueOnce({
+      injections: [{ kind: 'script-src', placement: 'head', src: '/plugins/??second/client.js&rev=second' }],
+      lease: 'boot-second',
+    })
+    instance.ready.resolve()
+    const window = harness.windows[0]!
+    const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame }
+    await expect(Promise.resolve(harness.handlers.get(DESKTOP_IPC.boot)!(event))).resolves.toMatchObject({
+      injections: [{ src: '/plugins/??first/client.js&rev=first' }],
+    })
+    expect(instance.releaseBootInjections).not.toHaveBeenCalled()
+    await expect(Promise.resolve(harness.handlers.get(DESKTOP_IPC.boot)!(event))).resolves.toMatchObject({
+      injections: [{ src: '/plugins/??second/client.js&rev=second' }],
+    })
+    expect(instance.releaseBootInjections).toHaveBeenCalledExactlyOnceWith('boot-first')
+    expect(instance.bootInjections).toHaveBeenCalledTimes(2)
+  })
+
+  it('releases only the renderer-owned boot lease and ignores failures after renderer destruction', async () => {
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const host = harness.hosts[0]!
+    host.ready.resolve()
+    const window = harness.windows[0]!
+    const sender = window.webContents
+    const boot = await invoke(DESKTOP_IPC.boot) as { lease: string }
+    await expect(invoke(DESKTOP_IPC.bootRelease, 'app', 'boot-foreign')).resolves.toBeUndefined()
+    expect(host.releaseBootInjections).not.toHaveBeenCalled()
+    window.destroyed = true
+    sender.isDestroyed = () => true
+    host.releaseBootInjections.mockRejectedValueOnce(new Error('child exited'))
+    await expect(invoke(DESKTOP_IPC.bootRelease, 'app', boot.lease)).resolves.toBeUndefined()
+    expect(host.releaseBootInjections).toHaveBeenCalledExactlyOnceWith(boot.lease)
+  })
+
+  it('retains a boot lease when the Host rejects its release before renderer destruction', async () => {
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const host = harness.hosts[0]!
+    host.ready.resolve()
+    const boot = await invoke(DESKTOP_IPC.boot) as { lease: string }
+    host.releaseBootInjections.mockRejectedValueOnce(new Error('release transport failed'))
+    await expect(invoke(DESKTOP_IPC.bootRelease, 'app', boot.lease)).rejects.toThrow('release transport failed')
+
+    windowDestroyed(harness.windows[0]!)
+    await vi.waitFor(() => { expect(host.releaseBootInjections).toHaveBeenCalledTimes(2) })
+    expect(host.releaseBootInjections).toHaveBeenLastCalledWith(boot.lease)
+  })
+
+  it('releases an outstanding boot lease when the renderer is destroyed', async () => {
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const host = harness.hosts[0]!
+    host.ready.resolve()
+    const window = harness.windows[0]!
+    const first = await invoke(DESKTOP_IPC.boot) as { lease: string }
+    windowDestroyed(window)
+    await vi.waitFor(() => { expect(host.releaseBootInjections).toHaveBeenCalledWith(first.lease) })
+    expect(host.releaseBootInjections).toHaveBeenCalledExactlyOnceWith(first.lease)
+  })
+
+  it('does not replay an acknowledged release when the renderer is destroyed during the release', async () => {
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const host = harness.hosts[0]!
+    host.ready.resolve()
+    const window = harness.windows[0]!
+    const sender = window.webContents
+    const boot = await invoke(DESKTOP_IPC.boot) as { lease: string }
+    const release = Promise.withResolvers<undefined>()
+    host.releaseBootInjections.mockImplementationOnce(() => release.promise)
+    const releasing = Promise.resolve(invoke(DESKTOP_IPC.bootRelease, 'app', boot.lease))
+    await vi.waitFor(() => { expect(host.releaseBootInjections).toHaveBeenCalledOnce() })
+    windowDestroyed(window)
+    sender.isDestroyed = () => true
+    release.resolve(undefined)
+    await releasing
+    await vi.advanceTimersByTimeAsync(0)
+    expect(host.releaseBootInjections).toHaveBeenCalledExactlyOnceWith(boot.lease)
+  })
+
+  it('does not retry a failed release after renderer destruction', async () => {
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const host = harness.hosts[0]!
+    host.ready.resolve()
+    const window = harness.windows[0]!
+    const sender = window.webContents
+    const boot = await invoke(DESKTOP_IPC.boot) as { lease: string }
+    const release = Promise.withResolvers<undefined>()
+    host.releaseBootInjections.mockImplementationOnce(() => release.promise)
+    const releasing = Promise.resolve(invoke(DESKTOP_IPC.bootRelease, 'app', boot.lease))
+    await vi.waitFor(() => { expect(host.releaseBootInjections).toHaveBeenCalledOnce() })
+    windowDestroyed(window)
+    sender.isDestroyed = () => true
+    release.reject(new Error('release acknowledgement lost'))
+    await expect(releasing).resolves.toBeUndefined()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(host.releaseBootInjections).toHaveBeenCalledExactlyOnceWith(boot.lease)
+  })
+
+  it('does not replay a release whose acknowledgement was lost after renderer destruction begins', async () => {
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const host = harness.hosts[0]!
+    host.ready.resolve()
+    const window = harness.windows[0]!
+    const boot = await invoke(DESKTOP_IPC.boot) as { lease: string }
+    const release = Promise.withResolvers<undefined>()
+    host.releaseBootInjections.mockImplementationOnce(() => release.promise)
+    const releasing = Promise.resolve(invoke(DESKTOP_IPC.bootRelease, 'app', boot.lease))
+    await vi.waitFor(() => { expect(host.releaseBootInjections).toHaveBeenCalledOnce() })
+    const sender = window.webContents
+    windowDestroyed(window)
+    sender.isDestroyed = () => true
+    release.reject(new Error('release acknowledgement lost'))
+    await expect(releasing).resolves.toBeUndefined()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(host.releaseBootInjections).toHaveBeenCalledExactlyOnceWith(boot.lease)
+  })
+
+  it('drains a pending boot before stopping the backend for the installer', async () => {
+    const host = await readyForUpdate()
+    const first = await invoke(DESKTOP_IPC.boot) as { lease: string }
+    const pendingBoot = Promise.withResolvers<{ injections: readonly unknown[]; lease: string }>()
+    host.bootInjections.mockImplementationOnce(() => pendingBoot.promise)
+    const second = Promise.resolve(invoke(DESKTOP_IPC.boot)) as Promise<{ lease: string }>
+    await vi.waitFor(() => { expect(host.bootInjections).toHaveBeenCalledTimes(2) })
+
+    harness.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 })
+    const preparing = harness.prepareUpdate()
+    await vi.waitFor(() => { expect(host.releaseBootInjections).toHaveBeenCalledWith(first.lease) })
+    expect(host.releaseBootInjections).not.toHaveBeenCalledWith('boot-2')
+    await host.stopping.promise
+    expect(host.stop).toHaveBeenCalled()
+
+    pendingBoot.resolve({ injections: [], lease: 'boot-2' })
+    await expect(second).rejects.toThrow('desktop boot: Host changed before boot completed')
+    await vi.waitFor(() => { expect(host.releaseBootInjections).toHaveBeenCalledWith('boot-2') })
+    host.exited.resolve()
+    await expect(preparing).resolves.toBe(true)
+  })
+
+  it('releases outstanding boot leases before stopping the backend for the installer', async () => {
+    const host = await readyForUpdate()
+    const first = await invoke(DESKTOP_IPC.boot) as { lease: string }
+    host.bootInjections.mockResolvedValueOnce({ injections: [], lease: 'boot-2' })
+    const second = await invoke(DESKTOP_IPC.boot) as { lease: string }
+    expect(host.releaseBootInjections).toHaveBeenCalledExactlyOnceWith(first.lease)
+
+    harness.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 })
+    const preparing = harness.prepareUpdate()
+    await host.stopping.promise
+    expect(host.releaseBootInjections).toHaveBeenCalledWith(second.lease)
+    expect(host.releaseBootInjections.mock.invocationCallOrder.at(-1)!).toBeLessThan(host.stop.mock.invocationCallOrder[0]!)
+    host.exited.resolve()
+    await expect(preparing).resolves.toBe(true)
+  })
+
+  it('serializes concurrent boot requests so each lease is retained and released once', async () => {
+    const host = await readyForUpdate()
+    const firstBoot = Promise.withResolvers<{ injections: readonly unknown[]; lease: string }>()
+    host.bootInjections.mockReset()
+      .mockImplementationOnce(() => firstBoot.promise)
+      .mockResolvedValueOnce({ injections: [], lease: 'boot-2' })
+    const first = Promise.resolve(invoke(DESKTOP_IPC.boot)) as Promise<{ lease: string }>
+    const second = Promise.resolve(invoke(DESKTOP_IPC.boot)) as Promise<{ lease: string }>
+    await vi.waitFor(() => { expect(host.bootInjections).toHaveBeenCalledOnce() })
+    firstBoot.resolve({ injections: [], lease: 'boot-1' })
+    await expect(first).resolves.toMatchObject({ lease: 'boot-1' })
+    await expect(second).resolves.toMatchObject({ lease: 'boot-2' })
+    expect(host.releaseBootInjections).toHaveBeenCalledExactlyOnceWith('boot-1')
+
+    await invoke(DESKTOP_IPC.bootRelease, 'app', 'boot-2')
+    expect(host.releaseBootInjections).toHaveBeenCalledTimes(2)
+    expect(host.releaseBootInjections).toHaveBeenLastCalledWith('boot-2')
+  })
+
+  it('discards a lease acquired from a Host that was replaced before boot completed', async () => {
+    const host = await readyForUpdate()
+    const pending = Promise.withResolvers<{ injections: readonly unknown[]; lease: string }>()
+    host.bootInjections.mockReset().mockImplementationOnce(() => pending.promise)
+    const boot = Promise.resolve(invoke(DESKTOP_IPC.boot))
+
+    harness.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 })
+    const preparing = harness.prepareUpdate()
+    await host.stopping.promise
+    host.exited.resolve()
+    await expect(preparing).resolves.toBe(true)
+
+    const restarted = harness.nextHostStart()
+    harness.publishUpdate({ phase: 'error', version: '1.0.1-nightly.1', failedOperation: 'install', message: 'Installer failed' })
+    await restarted
+    const replacement = harness.hosts[1]!
+    replacement.ready.resolve()
+    await vi.waitFor(() => { expect(harness.windows[0]!.urls).toEqual(['dsh-app://app/', 'dsh-app://app/']) })
+
+    pending.resolve({ injections: [], lease: 'stale' })
+    await expect(boot).rejects.toThrow('desktop boot: Host changed before boot completed')
+    expect(host.releaseBootInjections).toHaveBeenCalledWith('stale')
   })
 
   it('retains macOS native editing actions on right-click and only copy for selected read-only text', async () => {
@@ -2413,7 +2678,7 @@ describe('desktop main startup', () => {
     expect(replacement.updateTasks).not.toHaveBeenCalled()
     replacement.ready.resolve()
     await vi.waitFor(() => { expect(harness.windows[0]!.urls).toEqual(['dsh-app://app/', 'dsh-app://app/']) })
-    await expect(Promise.resolve(invoke(DESKTOP_IPC.boot))).resolves.toEqual({ injections: [], streamBaseUrl: 'http://127.0.0.1:3099' })
+    await expect(Promise.resolve(invoke(DESKTOP_IPC.boot))).resolves.toEqual({ injections: [], lease: 'boot-1', streamBaseUrl: 'http://127.0.0.1:3099' })
     if (mandatory) await answerMandatory('later')
     await expect(retry).resolves.toBe(false)
     expect(replacement.updateTasks.mock.calls).toEqual([['inspect']])
@@ -2422,6 +2687,74 @@ describe('desktop main startup', () => {
       expect(harness.windows).toHaveLength(1)
       expect(harness.windows[0]!.isDestroyed()).toBe(false)
     }
+  })
+
+  it('reopens boot admission after a failed Host replacement becomes ready', async () => {
+    const host = await readyForUpdate()
+    const original = harness.windows[0]!
+    harness.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 })
+    const preparing = harness.prepareUpdate()
+    await host.stopping.promise
+    host.exited.reject(new DesktopHostUncleanExitError('Task teardown failed after child exit'))
+    await expect(preparing).rejects.toMatchObject(new DesktopUpdatePreparationError('stop-failed', en.updateStopFailed, 'Task teardown failed after child exit'))
+
+    // Publishing the installer failure starts one replacement Host. Its Host
+    // becomes ready normally, but the delayed document asks for boot first.
+    const restart = harness.nextHostStart()
+    harness.publishUpdate({ phase: 'error', version: '1.0.1-nightly.1', failedOperation: 'install', message: 'Task teardown failed' })
+    await restart
+    const replacement = harness.hosts[1]!
+    replacement.ready.resolve()
+    await vi.waitFor(() => { expect(harness.windows[0]!.urls).toEqual(['dsh-app://app/', 'dsh-app://app/']) })
+
+    // Destroying the reloaded document while the Host prepares a response must not
+    // change the shared admission that the replacement window will use.
+    const pending = Promise.withResolvers<{ injections: readonly unknown[]; lease: string }>()
+    replacement.bootInjections.mockImplementationOnce(() => pending.promise)
+    const boot = Promise.resolve(invoke(DESKTOP_IPC.boot))
+    await vi.waitFor(() => { expect(replacement.bootInjections).toHaveBeenCalledOnce() })
+
+    windowDestroyed(original)
+    pending.resolve({ injections: [], lease: 'boot-2' })
+    await expect(boot).resolves.toEqual({
+      injections: [], lease: 'boot-2', streamBaseUrl: 'http://127.0.0.1:3080',
+    })
+
+    // The replacement window receives a fresh Host and can boot normally.
+    harness.app.emit('second-instance')
+    const window = harness.windows[1]!
+    await vi.waitFor(() => { expect(window.urls).toEqual(['dsh-app://app/']) })
+    replacement.bootInjections.mockResolvedValueOnce({ injections: [], lease: 'boot-3' })
+    const handler = harness.handlers.get(DESKTOP_IPC.boot)!
+    const replacementEvent = {
+      sender: window.webContents,
+      senderFrame: window.webContents.mainFrame,
+    }
+    await expect(Promise.resolve(handler(replacementEvent))).resolves.toEqual({
+      injections: [], lease: 'boot-3', streamBaseUrl: 'http://127.0.0.1:3080',
+    })
+  })
+
+  it('uses the startup promise created during installer recovery', async () => {
+    const host = await readyForUpdate()
+    harness.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 })
+    const preparing = harness.prepareUpdate()
+    await host.stopping.promise
+    host.exited.resolve()
+    await expect(preparing).resolves.toBe(true)
+
+    harness.dialog.showMessageBox.mockResolvedValue({ response: 1 })
+    const firstRestart = harness.nextHostStart()
+    harness.publishUpdate({ phase: 'error', version: '1.0.1-nightly.1', failedOperation: 'install', message: 'Installer failed' })
+    await firstRestart
+    const replacement = harness.hosts[1]!
+    replacement.url = 'http://127.0.0.1:3099/?token=replacement'
+    const request = Promise.resolve(invoke(DESKTOP_IPC.boot))
+    replacement.ready.resolve()
+    await vi.waitFor(() => { expect(harness.windows[0]!.urls).toEqual(['dsh-app://app/', 'dsh-app://app/']) })
+    await expect(request).resolves.toEqual({
+      injections: [], lease: 'boot-1', streamBaseUrl: 'http://127.0.0.1:3099',
+    })
   })
 
   it.each([false, true])('restores a confirmed non-graceful exit without approving installation, mandatory: %s', async (mandatory) => {
@@ -2791,6 +3124,288 @@ describe('desktop main startup', () => {
     expect(harness.windows[0]!.urls).toEqual(['dsh-app://app/'])
   })
 
+  it('rolls the profile back once a launch streak never reached readiness, then reports it', async () => {
+    const profileDir = harness.profileDir
+    writeFileSync(join(profileDir, 'cordis.patch.yml'), 'patches: []\n')
+    onTestFinished(() => { rmSync(join(profileDir, 'cordis.patch.yml'), { force: true }) })
+    writeFileSync(join(bootJournalDirectory, 'boot-failures.json'), JSON.stringify({
+      version: 1,
+      fingerprint: profileFingerprint(profileDir),
+      failures: DEFAULT_BOOT_FAILURE_LIMIT,
+      kind: 'composition',
+      firstFailureAt: '2026-10-20T00:00:00.000Z',
+      lastFailureAt: '2026-10-20T00:01:00.000Z',
+      rollbackApplied: false,
+    }))
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    expect(harness.disableAllPlugins).toHaveBeenCalledOnce()
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    harness.hosts[0]!.ready.resolve()
+    await vi.waitFor(() => {
+      expect(harness.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ title: en.startupRolledBackTitle }))
+    })
+    const options = harness.dialog.showMessageBox.mock.calls.at(-1)![0] as MessageBoxOptions
+    expect(options.title).toBe(en.startupRolledBackTitle)
+    expect(options.message).toContain(String(DEFAULT_BOOT_FAILURE_LIMIT))
+    // The rollback latch is consumed: once the recovered profile reaches readiness the record is cleared, so a
+    // later breakdown starts a fresh streak instead of inheriting this one.
+    await vi.waitFor(() => { expect(existsSync(join(bootJournalDirectory, 'boot-failures.json'))).toBe(false) })
+  })
+
+  it('clears the boot failure record once a launch reaches readiness', async () => {
+    const profileDir = harness.profileDir
+    writeFileSync(join(profileDir, 'cordis.patch.yml'), 'patches: []\n')
+    onTestFinished(() => { rmSync(join(profileDir, 'cordis.patch.yml'), { force: true }) })
+    writeFileSync(join(bootJournalDirectory, 'boot-failures.json'), JSON.stringify({
+      version: 1,
+      fingerprint: profileFingerprint(profileDir),
+      failures: 1,
+      kind: 'composition',
+      firstFailureAt: '2026-10-20T00:00:00.000Z',
+      lastFailureAt: '2026-10-20T00:01:00.000Z',
+      rollbackApplied: false,
+    }))
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    harness.hosts[0]!.ready.resolve()
+    await harness.navigated.promise
+    await vi.waitFor(() => { expect(existsSync(join(bootJournalDirectory, 'boot-failures.json'))).toBe(false) })
+  })
+
+  it('records a failure when startup never reaches readiness', async () => {
+    const profileDir = harness.profileDir
+    writeFileSync(join(profileDir, 'cordis.patch.yml'), 'patches: []\n')
+    onTestFinished(() => { rmSync(join(profileDir, 'cordis.patch.yml'), { force: true }) })
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    harness.hosts[0]!.ready.reject(new Error('plugin did not activate'))
+    // The backend awaits child cleanup before publishing the failure, so the exit settles first.
+    await harness.hosts[0]!.stopping.promise
+    harness.hosts[0]!.exited.resolve()
+    await harness.dialogShown.promise
+    // The shell records the failure on the rejection path; the dialog is published before that path settles.
+    await vi.waitFor(() => { expect(existsSync(join(bootJournalDirectory, 'boot-failures.json'))).toBe(true) })
+    const record = JSON.parse(readFileSync(join(bootJournalDirectory, 'boot-failures.json'), 'utf8')) as BootFailureRecord
+    expect(record).toMatchObject({ version: 1, failures: 1, kind: 'composition', rollbackApplied: false })
+    expect(record.fingerprint).toBe(profileFingerprint(profileDir))
+  })
+
+  it('leaves a ready Host unprobed when the interval is explicitly zero', async () => {
+    vi.stubEnv('DSH_DESKTOP_HOST_LIVENESS_INTERVAL_MS', '0')
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    harness.hosts[0]!.ready.resolve()
+    await harness.navigated.promise
+    await vi.advanceTimersByTimeAsync(600_000)
+    // Probing is on by default; zero is the escape hatch for deployments that must never lose a long task.
+    expect(harness.hosts[0]!.probe).not.toHaveBeenCalled()
+  })
+
+  it('describes a stall with the event-loop delay the last answered probe measured', async () => {
+    vi.stubEnv('DSH_DESKTOP_HOST_LIVENESS_INTERVAL_MS', '1000')
+    vi.stubEnv('DSH_DESKTOP_HOST_STALL_PROBES', '0')
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const host = harness.hosts[0]!
+    host.ready.resolve()
+    await harness.navigated.promise
+    // The Host answers once with a measurement, then stops answering: the report describes the measured window.
+    host.probe.mockResolvedValueOnce({ observedMs: 30_000, samples: 30_000, p50Ms: 1, p99Ms: 240, maxMs: 4800 })
+    await vi.advanceTimersByTimeAsync(1000)
+    host.probe.mockResolvedValue(undefined)
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => { expect(writeCrashReport).toHaveBeenCalledOnce() })
+    const [, report] = vi.mocked(writeCrashReport).mock.calls[0]!
+    const message = (report.error as Error).message
+    expect(message).toContain('did not answer a probe')
+    // The measurement is what separates a blocked loop from a slow request.
+    expect(message).toContain('blocked for up to 4800 ms')
+    expect(message).toContain('p99 240 ms')
+    expect(message).toContain('over 30000 ms')
+  })
+
+  it('says so when a stalled Host reported no delay measurement', async () => {
+    vi.stubEnv('DSH_DESKTOP_HOST_LIVENESS_INTERVAL_MS', '1000')
+    vi.stubEnv('DSH_DESKTOP_HOST_STALL_PROBES', '0')
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const host = harness.hosts[0]!
+    host.ready.resolve()
+    await harness.navigated.promise
+    // Every probe times out, so no measurement ever reached the shell.
+    host.probe.mockResolvedValue(undefined)
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => { expect(writeCrashReport).toHaveBeenCalledOnce() })
+    const [, report] = vi.mocked(writeCrashReport).mock.calls[0]!
+    expect((report.error as Error).message).toContain('No event-loop delay measurement was available')
+  })
+
+  it('does not quote a replaced Host\'s measurement in a later stall report', async () => {
+    vi.stubEnv('DSH_DESKTOP_HOST_LIVENESS_INTERVAL_MS', '1000')
+    vi.stubEnv('DSH_DESKTOP_HOST_STALL_PROBES', '1')
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const first = harness.hosts[0]!
+    first.ready.resolve()
+    await harness.navigated.promise
+    // The first Host measures a block, then stalls and is replaced.
+    first.probe.mockResolvedValueOnce({ observedMs: 30_000, samples: 30_000, p50Ms: 1, p99Ms: 240, maxMs: 4800 })
+    await vi.advanceTimersByTimeAsync(1000)
+    first.probe.mockResolvedValue(undefined)
+    const restarted = harness.nextHostStart()
+    const navigation = harness.nextNavigation()
+    await vi.advanceTimersByTimeAsync(1000)
+    await first.stopping.promise
+    first.exited.resolve()
+    await restarted
+    harness.hosts[1]!.ready.resolve()
+    await navigation
+    vi.mocked(writeCrashReport).mockClear()
+    // The replacement never reports a measurement, so its own stall must not borrow the previous Host's.
+    harness.hosts[1]!.probe.mockResolvedValue(undefined)
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => { expect(writeCrashReport).toHaveBeenCalledOnce() })
+    const [, report] = vi.mocked(writeCrashReport).mock.calls[0]!
+    const message = (report.error as Error).message
+    expect(message).toContain('No event-loop delay measurement was available')
+    expect(message).not.toContain('4800')
+  }, 20_000)
+
+  it('reports a stalled Host once and keeps the process alive', async () => {
+    vi.stubEnv('DSH_DESKTOP_HOST_LIVENESS_INTERVAL_MS', '1000')
+    // Detection only: this case pins the report, not the replacement.
+    vi.stubEnv('DSH_DESKTOP_HOST_STALL_PROBES', '0')
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    harness.hosts[0]!.ready.resolve()
+    await harness.navigated.promise
+    harness.hosts[0]!.probe.mockResolvedValue(undefined)
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => { expect(writeCrashReport).toHaveBeenCalledOnce() })
+    const [directory, report] = vi.mocked(writeCrashReport).mock.calls[0]!
+    expect(directory).toBe(harness.app.getPath('logs'))
+    expect(report.source).toBe('host')
+    expect(report.phase).toBe('running')
+    expect((report.error as Error).message).toContain('did not answer a probe')
+    // A stalled Host is still a live process: the report does not turn into a fatal exit or a plugin rewrite.
+    expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
+    expect(harness.disableAllPlugins).not.toHaveBeenCalled()
+    // Later missed probes of the same episode add no further reports.
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(writeCrashReport).toHaveBeenCalledOnce()
+  })
+
+  it('clears the missed-probe episode once the Host answers again', async () => {
+    vi.stubEnv('DSH_DESKTOP_HOST_LIVENESS_INTERVAL_MS', '1000')
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    harness.hosts[0]!.ready.resolve()
+    await harness.navigated.promise
+    const probe = harness.hosts[0]!.probe
+    probe.mockResolvedValueOnce(undefined)
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => { expect(writeCrashReport).toHaveBeenCalledOnce() })
+    // The next answered probe ends the episode, so a later stall is reported again.
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(probe.mock.calls.length).toBeGreaterThanOrEqual(2)
+    probe.mockResolvedValue(undefined)
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => { expect(writeCrashReport).toHaveBeenCalledTimes(2) })
+  })
+
+  it('restarts a Host that misses the configured number of probes', async () => {
+    vi.stubEnv('DSH_DESKTOP_HOST_LIVENESS_INTERVAL_MS', '1000')
+    vi.stubEnv('DSH_DESKTOP_HOST_STALL_PROBES', '3')
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const first = harness.hosts[0]!
+    first.ready.resolve()
+    await harness.navigated.promise
+    first.probe.mockResolvedValue(undefined)
+    const restarted = harness.nextHostStart()
+    const navigation = harness.nextNavigation()
+    await vi.advanceTimersByTimeAsync(3000)
+    // The restart waits for the stalled child to exit, which its stop acknowledgement settles.
+    await harness.hosts[0]!.stopping.promise
+    first.exited.resolve()
+    // Three consecutive missed probes replace the Host instead of only reporting it.
+    await restarted
+    expect(harness.hosts).toHaveLength(2)
+    expect(first.stop).toHaveBeenCalled()
+    harness.hosts[1]!.ready.resolve()
+    await navigation
+    expect(harness.windows[0]!.urls).toEqual(['dsh-app://app/', 'dsh-app://app/'])
+  }, 20_000)
+
+  it('never restarts a Host below the configured probe threshold', async () => {
+    vi.stubEnv('DSH_DESKTOP_HOST_LIVENESS_INTERVAL_MS', '1000')
+    vi.stubEnv('DSH_DESKTOP_HOST_STALL_PROBES', '5')
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const host = harness.hosts[0]!
+    host.ready.resolve()
+    await harness.navigated.promise
+    host.probe.mockResolvedValue(undefined)
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(harness.hosts).toHaveLength(1)
+    expect(host.stop).not.toHaveBeenCalled()
+    // The report still lands at the first miss, so a slow stall is visible before the threshold.
+    expect(writeCrashReport).toHaveBeenCalledOnce()
+  }, 20_000)
+
+  it('reports rather than restarting again once the restart budget is spent', async () => {
+    vi.stubEnv('DSH_DESKTOP_HOST_LIVENESS_INTERVAL_MS', '1000')
+    vi.stubEnv('DSH_DESKTOP_HOST_STALL_PROBES', '1')
+    vi.stubEnv('DSH_DESKTOP_HOST_STALL_RECOVERIES', '1')
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    const first = harness.hosts[0]!
+    first.ready.resolve()
+    await harness.navigated.promise
+    first.probe.mockResolvedValue(undefined)
+    const restarted = harness.nextHostStart()
+    await vi.advanceTimersByTimeAsync(1000)
+    await harness.hosts[0]!.stopping.promise
+    first.exited.resolve()
+    await restarted
+    harness.hosts[1]!.ready.resolve()
+    await vi.waitFor(() => { expect(harness.hosts).toHaveLength(2) })
+    harness.dialog.showMessageBox.mockClear()
+    const second = harness.hosts[1]!
+    second.probe.mockResolvedValue(undefined)
+    await vi.advanceTimersByTimeAsync(1000)
+    // The single permitted recovery is spent: the second stall reports instead of restarting forever.
+    expect(harness.hosts).toHaveLength(2)
+    const expected = en.stallNotRecovered.replace('{probes}', '1').replace('{recoveries}', '1')
+    await vi.waitFor(() => {
+      expect(harness.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ message: expected }))
+    })
+  }, 20_000)
+
   it('creates the Host only after the login-shell read and ends the read on quit', async () => {
     let finishRead!: () => void
     const read = new Promise<void>((resolve) => { finishRead = resolve })
@@ -2834,7 +3449,7 @@ describe('desktop main startup', () => {
       node: process.execPath,
       runtime: join(harness.app.getAppPath(), 'dsh'),
       primaryRuntime: join('desktop-test-resources', 'runtime', 'primary-runtime'),
-      profile: 'desktop-test-profile',
+      profile: harness.profileDir,
     })
     expect(harness.hosts[0]!.environment).not.toBe(process.env)
     expect(harness.hosts[0]!.environment?.DSH_CLIENT_VERSION).toBe('1.2.3')
@@ -2855,7 +3470,7 @@ describe('desktop main startup', () => {
     await harness.hostStarted.promise
     const project = join(harness.app.getAppPath(), '.desktop-build', 'development', 'project')
     expect(harness.hosts[0]).toMatchObject({ node: process.execPath, runtime: project,
-      primaryRuntime: 'test-primary-runtime', profile: 'desktop-test-profile' })
+      primaryRuntime: 'test-primary-runtime', profile: harness.profileDir })
     expect(harness.applyRelease).toHaveBeenCalledOnce()
     harness.hosts[0]!.ready.resolve()
     await harness.navigated.promise

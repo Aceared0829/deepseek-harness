@@ -4,6 +4,9 @@ vi.mock('../src/web-document.ts', () => ({
 /** Welcome startup uses the Host before transitioning to the workspace. */
 
 import { afterEach, expect, it, vi } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { BrowserWindowConstructorOptions } from 'electron'
 import type { DesktopLocale } from '../src/locale.ts'
 import type { AccountView } from '@deepseek-ai/dsh-deepseek-account/types'
@@ -21,8 +24,11 @@ const state = vi.hoisted(() => ({
   accountState: vi.fn<() => Promise<AccountView>>().mockResolvedValue({
     status: 'signed-out', attempt: null, links: { usageUrl: '', topUpUrl: '' },
   }),
+  // Electron's userData path decides where shell-owned files land. A real temporary directory keeps this suite
+  // from writing into the repository or the drive root, which an earlier version of it did.
+  userData: undefined as string | undefined,
   quit: vi.fn(),
-  startHost: vi.fn().mockResolvedValue({ url: 'http://127.0.0.1:3080/?token=test', injections: [] }),
+  startHost: vi.fn().mockResolvedValue({ url: 'http://127.0.0.1:3080/?token=test' }),
   stopHost: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
   loadWorkspace: vi.fn<(url: string) => Promise<void>>().mockResolvedValue(undefined),
   showWorkspace: vi.fn(),
@@ -60,7 +66,7 @@ vi.mock('electron', () => ({
     getVersion: () => '1.0.0',
     setAboutPanelOptions: vi.fn(),
     getAppPath: () => '/development-app',
-    getPath: (name: string) => name === 'userData' ? '/desktop-user-data' : `/development-${name}`,
+    getPath: (name: string) => name === 'userData' ? (state.userData ?? '/desktop-user-data') : `/development-${name}`,
     setAppLogsPath: vi.fn(),
     getPreferredSystemLanguages: () => ['en-US'],
     on: (name: string, callback: (...args: unknown[]) => void) => { state.appListeners.set(name, callback) },
@@ -114,9 +120,13 @@ vi.mock('../src/project-manager.ts', () => ({ DesktopProjectManager: class {
   canRecoverProfile = vi.fn(() => true)
 } }))
 vi.mock('../src/host-process.ts', () => ({
+  // main() reads the readiness bound and constructs the Host with it; the fake ignores the deadline.
+  HOST_READY_TIMEOUT_MS: 120_000,
   DesktopHostProcess: class {
     start = state.startHost
     stop = state.stopHost
+    bootInjections = async () => ({ injections: [], lease: 'welcome-boot' })
+    releaseBootInjections = async () => {}
     fetch() {
       return Promise.resolve(Response.json({
         loggedIn: false, hasApiKey: state.hasApiKey, writable: true, localePreference: state.preference,
@@ -172,11 +182,14 @@ afterEach(() => {
   vi.unstubAllEnvs()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
+  if (state.userData !== undefined) rmSync(state.userData, { recursive: true, force: true })
+  state.userData = undefined
 })
 
 it.each([false, true])('starts welcome onboarding without carrying update focus into login or skip (Windows update=%s)', async (updated) => {
   vi.resetModules()
   vi.clearAllMocks()
+  state.userData = mkdtempSync(join(tmpdir(), 'dsh-welcome-startup-user-data-'))
   state.preference = 'zh'
   state.hasApiKey = false
   state.operations = undefined

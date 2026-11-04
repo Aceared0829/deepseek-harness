@@ -28,14 +28,16 @@ import {
 } from 'electron'
 import { resolveDesktopPaths } from './paths.ts'
 import { DesktopProjectManager } from './project-manager.ts'
-import { DesktopHostFatalError, DesktopHostProcess, DesktopHostUncleanExitError } from './host-process.ts'
+import { DesktopHostFatalError, DesktopHostProcess, DesktopHostUncleanExitError, HOST_READY_TIMEOUT_MS } from './host-process.ts'
 import { DesktopPlatformView, PLATFORM_IPC, platformBounds } from './platform-view.ts'
 import { installDesktopFileDrag } from './file-drag.ts'
 import { installDesktopDirectoryPicker } from './directory-picker.ts'
 import { installMicrophonePermissions } from './microphone-permissions.ts'
-import { DesktopBackendController } from './backend-controller.ts'
+import { DesktopBackendController, type DesktopBackendHost } from './backend-controller.ts'
+import type { DesktopEventLoopDelay } from './host-process.ts'
 import { DESKTOP_IPC, SCHEME, assertDesktopSender, type DesktopUpdateState } from './ipc.ts'
 import { readDeviceInfo } from './device-info.ts'
+import { resolveDurationMs, resolveLivenessInterval, resolveProbeDeadline, resolveStallProbes, resolveStallRecoveries } from './duration-env.ts'
 import { desktopUpdateReadyConfirmation, formatDesktopMessage, resolveDesktopLocale, resolveDesktopStartupLocale } from './locale.ts'
 import { claimDesktopSingleInstance } from './single-instance.ts'
 import { desktopUpdateChannel } from './update-channel.ts'
@@ -51,6 +53,7 @@ import { openWelcomeWindow } from './welcome-window.ts'
 import { WELCOME_IPC, needsWelcome, type WelcomeNotice } from './welcome-api.ts'
 import { connectDesktopWelcome, type DesktopWelcomeBackend } from './welcome-backend.ts'
 import { DesktopUpdateJournal } from './update-journal.ts'
+import { DesktopBootJournal } from './boot-journal.ts'
 import { DesktopUpdatePreparationError } from './update-error.ts'
 import { DesktopUpdateSchedule, resolveDesktopUpdateScheduleConfig } from './update-schedule.ts'
 import { desktopUpdateErrorSummary, presentDesktopUpdate } from './update-presentation.ts'
@@ -88,6 +91,19 @@ let windowsLanguage: string | undefined = readDesktopLocaleCache(app.getPath('us
 let backendReady = false
 /** Error-level console output of the primary window, attached to crash reports. */
 const rendererConsole = new RendererConsoleTail()
+/** Unanswered liveness probes of the current Host, reported once per episode. */
+let missedProbes = 0
+
+/**
+ * Describe the delay the Host last measured, so a stall report says whether its loop was blocked and for how long.
+ * @param delay - Measurement from the last answered probe, if one was recorded.
+ * @returns One sentence for the crash report; never empty.
+ */
+function describeDelay(delay: DesktopEventLoopDelay | undefined): string {
+  if (delay === undefined || delay.samples === 0) return 'No event-loop delay measurement was available.'
+  return `Before that, its event loop was blocked for up to ${String(delay.maxMs)} ms`
+    + ` (p99 ${String(delay.p99Ms)} ms, p50 ${String(delay.p50Ms)} ms over ${String(delay.observedMs)} ms).`
+}
 
 // Platform-conventional logs directory (macOS ~/Library/Logs/<name>, otherwise under userData);
 // set before ready so the first fatal report already resolves under it.
@@ -381,6 +397,9 @@ async function main(): Promise<void> {
     : join(process.resourcesPath, 'runtime', 'primary-runtime')
   const activeProject = paths.profile
   const manager = new DesktopProjectManager(paths, resources)
+  // Shell-owned evidence of launches that never reached readiness. It lives beside the settings, not in the
+  // profile, so rolling the profile back cannot lose the record that authorizes the rollback.
+  const bootJournal = new DesktopBootJournal(app.getPath('userData'), activeProject)
   // Dock and Finder launches inherit only launchd's environment; every Host shares one login-shell read.
   const loginShellRead = new AbortController()
   // The probe runs in its own process group, which outlives Desktop unless the read is aborted.
@@ -468,7 +487,6 @@ async function main(): Promise<void> {
   }
   const commandManager = new DesktopCommandManager({
     resources: process.resourcesPath,
-    isPackaged: app.isPackaged,
     isInstalledLocation: () => process.platform !== 'darwin' || app.isInApplicationsFolder(),
     isInstalling: () => updateState.phase === 'installing',
     isQuitting,
@@ -479,8 +497,83 @@ async function main(): Promise<void> {
   const applicationUrl = `${SCHEME}://app/`
   let hostUrl: string | undefined
   let hostCookie: string | undefined
+  interface BootLease {
+    readonly host: Pick<DesktopHostProcess, 'releaseBootInjections'>
+    readonly lease: string
+  }
+  const bootLeases = new Map<Electron.WebContents, BootLease>()
+  const bootOperations = new WeakMap<Electron.WebContents, Promise<void>>()
+  let bootAdmissionOpen = true
+  // A renderer can have only one boot request acquiring or releasing its lease at a time.
+  const runBootOperation = <T>(sender: Electron.WebContents, operation: () => Promise<T>): Promise<T> => {
+    const previous = bootOperations.get(sender) ?? Promise.resolve()
+    const result = previous.then(operation, operation)
+    const settled = result.then(() => undefined, () => undefined)
+    bootOperations.set(sender, settled)
+    void settled.then(() => {
+      if (bootOperations.get(sender) === settled) bootOperations.delete(sender)
+    })
+    return result
+  }
+  const bootError = (): Error => new Error(quitting
+    ? 'desktop boot: application is quitting'
+    : 'desktop boot: application is preparing to stop')
+  const assertBootAdmitted = (message: string): void => {
+    if (!quitting && bootAdmissionOpen) return
+    throw new Error(quitting ? 'desktop boot: application is quitting' : message)
+  }
+  // Closing admission invalidates requests already waiting on the Host while
+  // allowing update failures before Host replacement to accept future boots.
+  const drainBootAdmission = (): void => {
+    bootAdmissionOpen = false
+  }
+  const openBootAdmission = (): void => {
+    if (quitting) return
+    bootAdmissionOpen = true
+  }
+  const releaseBootLease = async (sender: Electron.WebContents, requested?: string): Promise<void> => {
+    const held = bootLeases.get(sender)
+    if (held === undefined || (requested !== undefined && held.lease !== requested)) return
+    bootLeases.delete(sender)
+    try {
+      await held.host.releaseBootInjections(held.lease)
+    } catch (error) {
+      if (!sender.isDestroyed() && bootAdmissionOpen) {
+        bootLeases.set(sender, held)
+        throw error
+      }
+      // The renderer cannot retry after destruction, and Host shutdown releases
+      // every retained lease when admission is draining.
+      return
+    }
+  }
+  const releaseBootLeases = async (): Promise<void> => {
+    const held = [...bootLeases]
+    const acknowledgements = held.map(async ([sender, boot]) => {
+      // Remove before awaiting so a renderer destroyed while the release is
+      // pending cannot replay an operation that may already have taken effect.
+      if (bootLeases.get(sender) === boot) bootLeases.delete(sender)
+      try {
+        await boot.host.releaseBootInjections(boot.lease)
+      } catch {
+        // Host shutdown owns every retained lease after admission is closed.
+      }
+    })
+    await Promise.allSettled(acknowledgements)
+    // A global sweep precedes Host shutdown, whose own lease map is
+    // authoritative after an acknowledgement was lost. Dropping these records
+    // avoids replaying an operation whose outcome is already unknown.
+  }
+  /** Stop new boot acquisition, resolve the Host request it may be waiting on, and settle held leases. */
+  const sweepBootLeases = async (): Promise<void> => {
+    drainBootAdmission()
+    await releaseBootLeases()
+  }
+  const failBootLeases = (): void => {
+    drainBootAdmission()
+    void releaseBootLeases().catch((error: unknown) => { console.error(error) })
+  }
   const browserGuests = new DesktopBrowserGuests(() => hostUrl)
-  let injections: readonly unknown[] = []
   let welcomeBackend: DesktopWelcomeBackend | undefined
   let reportedLaunch = false
   let analyticsEnabled = false
@@ -521,12 +614,122 @@ async function main(): Promise<void> {
   const platformView = new DesktopPlatformView(join(app.getAppPath(), 'lib', 'preload-platform-account.cjs'),
     () => locale.id === 'zh-CN' ? 'zh_CN' : 'en_US', process.platform === 'win32' ? 'win32' : 'darwin',
     owner => isMandatory() || updateOverlays.input(owner).blocked)
+  /** Liveness probe cadence; `0` (the default) leaves the running Host unprobed. */
+  const livenessIntervalMs = resolveLivenessInterval(process.env)
+  /** Time one liveness probe waits for an answer before counting as missed. */
+  const probeDeadlineMs = resolveProbeDeadline(process.env)
+  /** Consecutive missed probes that restart the Host; `0` reports the stall without restarting it. */
+  const stallProbes = resolveStallProbes(process.env)
+  /** Restarts one application process may perform for stalls; further stalls are reported instead. */
+  const stallRecoveries = resolveStallRecoveries(process.env)
+  /** Whether this application is on its way out; read through a call so long async work never narrows it away. */
+  const quitRequested = (): boolean => quitting || shuttingDown
+  /** The single liveness timer of the current Host, cleared and replaced with every readiness. */
+  let livenessTimer: ReturnType<typeof setInterval> | undefined
+  /** Stall restarts already performed in this application process, across Host generations. */
+  let stallRestarts = 0
+  /** Set while a stall restart is in flight, so overlapping probes cannot start a second one. */
+  let recoveringFromStall = false
+  /** Disarm the liveness timer, if any; safe when none is armed. */
+  const stopLivenessWatch = (): void => {
+    if (livenessTimer === undefined) return
+    clearInterval(livenessTimer)
+    livenessTimer = undefined
+  }
+  /**
+   * Ask the running Host whether its event loop still answers. A plugin blocked in a synchronous loop leaves the
+   * request unanswered while the process stays alive, so nothing else in the shell notices: the window keeps
+   * rendering and boot IPC requests simply never settle. The first missed probe writes a crash report; the
+   * configured threshold then replaces the Host, which is the only recovery available from outside a wedged event
+   * loop. Work the stalled Host held is lost by that restart.
+   */
+  const startLivenessWatch = (): void => {
+    stopLivenessWatch()
+    if (livenessIntervalMs === 0) return
+    // The delay the last answered probe reported. A stall that follows it is described by that measurement,
+    // which is the difference between a blocked loop and a slow request. Each watch belongs to one Host
+    // generation, so a replacement starts with no measurement rather than quoting the previous Host's.
+    let lastDelay: DesktopEventLoopDelay | undefined
+    const timer = setInterval(() => {
+      const host = backend.host
+      if (host === undefined || quitting || shuttingDown || recoveringFromStall) {
+        if (host !== undefined) return
+        clearInterval(timer)
+        if (livenessTimer === timer) livenessTimer = undefined
+        return
+      }
+      void host.probe(probeDeadlineMs).then((delay) => {
+        if (delay !== undefined) { missedProbes = 0; lastDelay = delay; return }
+        missedProbes += 1
+        // One report per episode: later missed probes add nothing the first did not say.
+        if (missedProbes === 1) {
+          void persistCrashReport(new Error(
+            `desktop liveness: the Host did not answer a probe within ${String(probeDeadlineMs)} ms after`
+            + ` reaching readiness; a plugin may be holding its event loop. ${describeDelay(lastDelay)}`,
+          ), 'host').catch((failure: unknown) => { console.error(failure) })
+        }
+        if (stallProbes === 0 || missedProbes < stallProbes) return
+        // The measurement belongs to the Host being replaced; a later stall must not quote this generation's numbers.
+        lastDelay = undefined
+        restartStalledHost(host)
+      })
+    }, livenessIntervalMs)
+    timer.unref()
+    livenessTimer = timer
+  }
+  /**
+   * Replace a Host whose event loop stopped answering. The restart reuses the update handoff's replacement path:
+   * stop the child, start a new one, and reload the page against its new URL. A Host that keeps stalling is
+   * reported instead of restarted forever.
+   * @param stalled - The Host instance the probe failed against.
+   */
+  const restartStalledHost = (stalled: DesktopBackendHost): void => {
+    const host = backend.host
+    if (recoveringFromStall || host !== stalled || quitRequested()) return
+    if (stallRestarts >= stallRecoveries) {
+      if (missedProbes !== stallProbes) return
+      void ordinaryMessageBox({
+        type: 'error',
+        title: locale.messages.stallNotRecoveredTitle,
+        message: formatDesktopMessage(locale.messages.stallNotRecovered, {
+          probes: String(missedProbes), recoveries: String(stallRecoveries),
+        }),
+        buttons: [locale.messages.updateAcknowledge],
+        cancelId: 0,
+      }).catch((error: unknown) => { console.error(error) })
+      return
+    }
+    recoveringFromStall = true
+    stallRestarts += 1
+    missedProbes = 0
+    console.warn(`dsh desktop: restarting a Host that missed ${String(stallProbes)} liveness probes`)
+    updateJournal?.action('host-stall-restart')
+    const recovery = (async () => {
+      // Boot admission closes first so renderers cannot request injections from a Host about to be replaced.
+      await sweepBootLeases()
+      await backend.stop()
+      await backend.start(prepareHostEnvironment)
+      // Read through a call: a quit that landed during the restart must not be narrowed away here.
+      if (quitRequested()) return
+      navigation = undefined
+      await navigateMain(applicationUrl)
+      if (backend.host !== undefined) updateJournal?.action('workspace-ready')
+    })().catch((error: unknown) => { reportFatal(error, 'host') }).finally(() => {
+      recoveringFromStall = false
+      // The update handoff awaits this promise to know when a replacement Host settled; leaving a settled stall
+      // restart recorded would make every later update wait on a stale promise.
+      if (workspaceRecovery === recovery) workspaceRecovery = undefined
+    })
+    workspaceRecovery = recovery
+  }
+  app.on('will-quit', () => { stopLivenessWatch() })
   const backend = new DesktopBackendController((onFailure) => {
     const hostInspectPort = developmentHostInspectPort(development)
     const host = new DesktopHostProcess(resources.node, resources.dsh, activeProject,
       hostInspectPort, { ...hostEnvironment, DSH_CLIENT_VERSION: desktopClientVersion() }, onFailure,
       primaryRuntime,
-      resources, (next) => { platformView.setSession(next) }, (record) => {
+      resources, (next) => { platformView.setSession(next) },
+      resolveDurationMs(process.env, 'DSH_DESKTOP_HOST_READY_TIMEOUT_MS', HOST_READY_TIMEOUT_MS), (record) => {
         operationJournal ??= new OperationJournal(join(app.getPath('userData'), 'plugin-operations'), {
           segmentBytes: 256 * 1024, recordBytes: 4096, queuedBytes: 64 * 1024,
         })
@@ -538,11 +741,11 @@ async function main(): Promise<void> {
         const cookie = await authenticateWebHost(ready.url)
         hostCookie = cookie
         hostUrl = ready.url
+        // Every Host request carries the launch cookie explicitly; the jar keeps no authentication
+        // state, and legacy jar cookies from earlier releases are swept once per launch.
         void removeLegacyHostCookies(session.defaultSession.cookies, ready.url)
           .catch((error: unknown) => { console.error('desktop: legacy Host cookie cleanup failed', error) })
-        if (ready.injections === undefined) throw new Error('Desktop Host did not provide boot injections')
-        injections = ready.injections
-        welcomeBackend = connectDesktopWelcome(ready.url, cookie)
+        welcomeBackend = connectDesktopWelcome(ready.url, hostCookie)
         analyticsEnabled = await welcomeBackend.analyticsEnabled().catch(() => false)
         if (!reportedLaunch) { reportedLaunch = true; void track('desktop_app_launch', {}) }
         stopAccount?.()
@@ -596,11 +799,25 @@ async function main(): Promise<void> {
       },
       updateTasks: (action: 'inspect' | 'lock' | 'unlock') => host.updateTasks(action),
       inspectQuit: () => host.inspectQuit(),
+      bootInjections: () => host.bootInjections(),
+      releaseBootInjections: lease => host.releaseBootInjections(lease),
+      probe: (deadlineMs?: number) => host.probe(deadlineMs),
       resolveDragResource: (address: string, signal?: AbortSignal) => host.resolveDragResource(address, signal),
     }
   }, (state) => {
-    if (state.phase === 'error') reportFatal(state.failure, 'host')
-    else if (!shuttingDown) backendReady = state.phase === 'ready'
+    if (state.phase === 'error') {
+      reportFatal(state.failure, 'host')
+      failBootLeases()
+    } else if (!shuttingDown) backendReady = state.phase === 'ready'
+    if (state.phase === 'ready') {
+      openBootAdmission()
+      missedProbes = 0
+      startLivenessWatch()
+    } else {
+      // No ready Host means nothing to watch. Leaving the interval armed would outlive the Host it describes,
+      // including through a quit that does not emit `will-quit`.
+      stopLivenessWatch()
+    }
   })
 
   const updateErrors = new WeakMap<DesktopUpdateState, Promise<void>>()
@@ -635,6 +852,7 @@ async function main(): Promise<void> {
       }
       shellInstallerOwnsQuit = false
       updateStoppedHost = false
+      if (!quitting && (backend.host !== undefined || restoreHost)) openBootAdmission()
       if (restoreHost) {
         // Only confirmed process exit permits replacement before another installation confirmation.
         const hostReady = backend.start(prepareHostEnvironment)
@@ -670,18 +888,63 @@ async function main(): Promise<void> {
   const reconcileBackend = (): Promise<void> => {
     startup ??= (async () => {
       await navigateMain(applicationUrl)
+      let rolledBack: number | undefined
       await backend.start(async () => {
+        rolledBack = await recoverUnstartableProfile()
         await Promise.all([manager.applyRelease(), prepareHostEnvironment()])
       })
+      // Reachability is only established here: the Host has answered with its Web URL.
+      bootJournal.markReady()
       if (backend.host !== undefined) await openInitialWindow()
       if (backend.host !== undefined) updateJournal?.action('workspace-ready')
+      if (rolledBack !== undefined) {
+        // The profile no longer loads what the person configured, so say so instead of hiding the recovery.
+        void ordinaryMessageBox({
+          type: 'warning',
+          title: locale.messages.startupRolledBackTitle,
+          message: formatDesktopMessage(locale.messages.startupRolledBack, { failures: String(rolledBack) }),
+          buttons: [locale.messages.updateAcknowledge],
+          cancelId: 0,
+        }).catch((error: unknown) => { console.error(error) })
+      }
       // The existing Web document resumes through the boot IPC response.
     })().catch((error: unknown) => {
+      // Every path that ends startup without readiness lands here, including a Host that never reported and the
+      // directory a rollback could not save. A later successful launch clears the record again.
+      if (!isQuitting()) bootJournal.recordFailure(error)
       updateJournal?.action('workspace-failed')
       reportFatal(error, 'main')
       throw error
     }).finally(() => { startup = undefined })
     return startup
+  }
+
+  /**
+   * Roll the profile back to the shipped bundle set when the previous launches of this exact composition never
+   * reached readiness, and record that this composition used its one rollback. The write happens inside profile
+   * preparation, so the failing composition is replaced before the Host loads any plugin from it.
+   * @returns The failure count of the composition that was rolled back, or undefined when no rollback ran.
+   */
+  const recoverUnstartableProfile = async (): Promise<number | undefined> => {
+    const decision = bootJournal.evaluate()
+    if (!decision.rollback) return undefined
+    let backupPath: string | undefined
+    try {
+      backupPath = await manager.disableAllPlugins()
+    } catch (error) {
+      // The profile could not be rewritten. That is a fact about this launch, not a new startup failure: report
+      // it and let startup continue so its own diagnostic explains what is wrong.
+      console.warn('dsh desktop: the unstartable profile could not be rolled back', error)
+      return undefined
+    }
+    // The latch must name the composition that failed, which `evaluate` already identified: `disableAllPlugins`
+    // rewrites the profile, so a fingerprint read after it would describe the recovered composition instead.
+    bootJournal.recordRollback(decision.fingerprint)
+    console.warn(`dsh desktop: rolled back a profile that failed to start ${String(decision.failures)} times`, {
+      profilePatchBackup: backupPath ?? null,
+    })
+    updateJournal?.action('startup-rollback')
+    return decision.failures
   }
 
   const manifest: unknown = JSON.parse(await readFile(join(app.getAppPath(), 'package.json'), 'utf8'))
@@ -726,6 +989,7 @@ async function main(): Promise<void> {
         mandatoryUI?.preparingRestart(stillActive)
         // The embedded Platform document holds credentials issued by the Host that is about to stop.
         await platformView.closeAndWait()
+        await sweepBootLeases()
         await disposeFileDrag().catch((error: unknown) => { console.error(error) })
         requireCleanStop = true
         updateStopFailure = undefined
@@ -810,9 +1074,49 @@ async function main(): Promise<void> {
 
   ipcMain.handle(DESKTOP_IPC.boot, async (event) => {
     assertDesktopSender(event, ['app'])
-    await startup
-    if (backend.host === undefined || hostUrl === undefined) throw new Error('Desktop Host is unavailable')
-    return { injections, streamBaseUrl: new URL(hostUrl).origin }
+    const owner = mainWindow
+    if (owner === undefined || owner.isDestroyed() || event.sender !== owner.webContents
+      || event.senderFrame !== owner.webContents.mainFrame) {
+      throw new Error('dsh desktop: rejected IPC from an unowned renderer')
+    }
+    return runBootOperation(event.sender, async () => {
+      assertBootAdmitted(backend.host === undefined
+        ? 'desktop boot: application is starting'
+        : 'desktop boot: application is preparing to stop')
+      await releaseBootLease(event.sender)
+      // Installer recovery can replace the startup promise after this request
+      // enters the renderer queue, so read it after releasing the previous lease.
+      const currentStartup = startup
+      await currentStartup
+      const host = backend.host
+      if (quitting || host === undefined || hostUrl === undefined || typeof host.bootInjections !== 'function') {
+        throw new Error(quitting ? 'desktop boot: application is quitting' : 'Desktop Host is unavailable')
+      }
+      assertBootAdmitted('desktop boot: application is starting')
+      const boot = await host.bootInjections()
+      if (host !== backend.host) {
+        await host.releaseBootInjections(boot.lease).catch((error: unknown) => { console.error(error) })
+        throw new Error('desktop boot: Host changed before boot completed')
+      }
+      if (!bootAdmissionOpen) {
+        await host.releaseBootInjections(boot.lease).catch((error: unknown) => { console.error(error) })
+        throw bootError()
+      }
+      const held: BootLease = { host, lease: boot.lease }
+      bootLeases.set(event.sender, held)
+      return { ...boot, streamBaseUrl: new URL(hostUrl).origin }
+    })
+  })
+
+  ipcMain.handle(DESKTOP_IPC.bootRelease, async (event, lease: unknown) => {
+    assertDesktopSender(event, ['app'])
+    const owner = mainWindow
+    if (owner === undefined || event.sender !== owner.webContents
+      || event.senderFrame !== owner.webContents.mainFrame) {
+      throw new Error('dsh desktop: rejected IPC from an unowned renderer')
+    }
+    if (typeof lease !== 'string' || lease === '') throw new Error('desktop boot: lease must be non-empty text')
+    await runBootOperation(event.sender, () => releaseBootLease(event.sender, lease))
   })
 
   ipcMain.handle(DESKTOP_IPC.bootFailed, (event, message: unknown) => {
@@ -1158,8 +1462,9 @@ async function main(): Promise<void> {
       : { label: currentDesktopLocale().messages.aboutMenu, role: 'about' },
     { type: 'separator' },
     { label: currentDesktopLocale().messages.checkUpdatesMenu, click: () => { void openUpdatePrompt(true) } },
-    ...process.platform === 'darwin' || process.platform === 'win32'
-      ? [{ label: currentDesktopLocale().messages.cliCommandMenu, click: () => { void commandManager.show() } }] : [],
+    ...((process.platform === 'darwin' || process.platform === 'win32') && app.isPackaged
+      ? [{ label: currentDesktopLocale().messages.cliCommandMenu, click: () => { void commandManager.show() } }]
+      : []),
     { type: 'separator' },
     ...development ? [
       { label: currentDesktopLocale().messages.reloadPageMenu, role: 'reload' as const },
@@ -1271,6 +1576,10 @@ async function main(): Promise<void> {
   const createMainWindow = (): BrowserWindow => {
     const window = createWindow(appPreload, false, true)
     mainWindow = window
+    window.webContents.once('destroyed', () => {
+      void runBootOperation(window.webContents, () => releaseBootLease(window.webContents))
+        .catch((error: unknown) => { console.error(error) })
+    })
     browserGuests.bind(window, (guest, name) => shortcuts.attachGuest(window, guest, name))
     shortcuts.attach(window)
     window.on('focus', automaticCheck)
@@ -1448,6 +1757,8 @@ async function main(): Promise<void> {
   const finishQuit = (): void => {
     quitting = true
     shuttingDown = true
+    // Nothing left to supervise: a probe against a closing Host would only report a stall during teardown.
+    stopLivenessWatch()
     updateJournal?.action('quit-requested')
     quitConfirmation.dispose()
     backgroundNotice?.dispose()
@@ -1458,15 +1769,18 @@ async function main(): Promise<void> {
     updateSchedule.dispose()
     updateDialog.dispose()
     mandatoryUI?.dispose()
-    void Promise.all([stopOperationReports(), Promise.resolve(mandatoryPolicy?.dispose()).then(() => policyAuth?.dispose()),
+    // Boot leases close first so a renderer booting during shutdown cannot retain a bundle generation from a
+    // Host that is about to stop. Every cleanup is caught individually: one failure must not cut the rest short.
+    void sweepBootLeases().then(() => Promise.all([
+      stopOperationReports(), Promise.resolve(mandatoryPolicy?.dispose()).then(() => policyAuth?.dispose()),
       backend.close().then(async () => { await operationJournal?.drain(500) }, async (error: unknown) => {
         await operationJournal?.drain(500)
         throw error
       }),
       platformView.dispose(),
       disposeFileDrag(),
-    ].map(cleanup => cleanup.catch((error: unknown) => { console.error(error) })))
-      .then(() => { app.quit() })
+    ].map(cleanup => cleanup.catch((error: unknown) => { console.error(error) }))))
+      .catch((error: unknown) => { console.error(error) }).finally(() => { app.quit() })
   }
   app.on('before-quit', (event) => {
     if (shellInstallerOwnsQuit) {

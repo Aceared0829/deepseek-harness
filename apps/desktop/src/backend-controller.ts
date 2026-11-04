@@ -1,6 +1,7 @@
 /** Owns one backend startup and its quiescent teardown independently of windows. */
 
 import { desktopErrorState } from './startup-error.ts'
+import type { DesktopBootInjections, DesktopEventLoopDelay } from './host-process.ts'
 
 /** Backend availability presented by the desktop window. */
 export type DesktopBackendState =
@@ -20,6 +21,22 @@ export interface DesktopBackendHost {
   start(): Promise<unknown>
   /** @returns Completion of child exit. */
   stop(): Promise<void>
+  /** @returns Startup injection rows and the lease that retains their resources. */
+  bootInjections(): Promise<DesktopBootInjections>
+  /** @param lease - Host lease returned by {@link bootInjections}. */
+  releaseBootInjections(lease: string): Promise<void>
+  /**
+   * @param action - Read-only inspection, admission lock, or recovery unlock.
+   * @returns Whether live tasks would be affected.
+   */
+  updateTasks(action: 'inspect' | 'lock' | 'unlock'): Promise<boolean>
+  /** @returns Active tasks and armed scheduled reminders the current quit would interrupt. */
+  inspectQuit(): Promise<{ readonly activeTasks: boolean; readonly scheduledTasks: boolean }>
+  /**
+   * @param deadlineMs - Time the Host is given to answer before it counts as unresponsive.
+   * @returns The Host's event-loop delay measurement, or undefined when it did not answer in time.
+   */
+  probe(deadlineMs?: number): Promise<DesktopEventLoopDelay | undefined>
 }
 
 interface Attempt<Host> {

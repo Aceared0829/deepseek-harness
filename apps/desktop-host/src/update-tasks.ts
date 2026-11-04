@@ -4,6 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-client-connection'
+import type { EventLoopDelaySampler, EventLoopDelaySnapshot } from './event-loop-delay.ts'
 
 /**
  * Whether stopping the Host now would interrupt work: a generating or tool-running
@@ -23,9 +24,17 @@ export function hasDesktopActiveTasks(liveAgents: ReturnType<Context['agents']['
 /**
  * Register update admission on the owning Host context.
  * @param ctx - Booted Desktop profile context; disposal removes the request listener.
+ * @param sampler - Event-loop delay sampler whose snapshot rides along with every inspection, so the shell records
+ *   how long the loop was blocked rather than only that it stopped answering.
  * @returns Task inspector whose lock refuses new API requests, drains admitted requests, and rechecks work.
  */
-export function installDesktopUpdateTaskControl(ctx: Context): (action: 'inspect' | 'lock' | 'unlock') => Promise<boolean> {
+export function installDesktopUpdateTaskControl(
+  ctx: Context,
+  sampler?: EventLoopDelaySampler,
+): ((action: 'inspect' | 'lock' | 'unlock') => Promise<boolean>) & {
+  /** Delay distribution observed so far; all-zero counts when no sampler is running. */
+  eventLoopDelay: () => EventLoopDelaySnapshot
+} {
   let locked = false
   let lockGeneration = 0
   let stopped = false
@@ -42,7 +51,7 @@ export function installDesktopUpdateTaskControl(ctx: Context): (action: 'inspect
     try { await next() }
     finally { pendingRequests.delete(finished.promise); finished.resolve() }
   })
-  return async (action) => {
+  const inspect = async (action: 'inspect' | 'lock' | 'unlock'): Promise<boolean> => {
     if (stopped) throw new Error('desktop update: Host is stopping')
     if (action === 'unlock') { locked = false; lockGeneration++ }
     const agents = ctx.get('agents')
@@ -59,4 +68,10 @@ export function installDesktopUpdateTaskControl(ctx: Context): (action: 'inspect
     }
     return hasDesktopActiveTasks(agents.list(), jobs)
   }
+  return Object.assign(inspect, {
+    eventLoopDelay: (): EventLoopDelaySnapshot => sampler?.snapshot() ?? NO_DELAY,
+  })
 }
+
+/** What a Host without a sampler reports: a measurement that says nothing was recorded. */
+const NO_DELAY: EventLoopDelaySnapshot = { observedMs: 0, samples: 0, p50Ms: 0, p99Ms: 0, maxMs: 0 }

@@ -107,4 +107,6 @@ it.each([
     for (const name of omitted) expect(archive.getNode(join(directory, name))).toBeUndefined()
   }
   for (const [file, contents] of originals) expect(await readFile(file)).toEqual(contents)
-})
+// Real ASAR packaging for three targets, each building its own fixture tree: the default 5 s timeout is exceeded
+// when a full parallel run competes for the CPU.
+}, 30_000)

@@ -5,7 +5,8 @@ import { isAbsolute, join } from 'node:path'
 import type { DesktopUpdateState } from './ipc.ts'
 
 /** User and process milestones that connect update states across application restarts. */
-export type DesktopUpdateJournalAction = 'started' | 'workspace-ready' | 'workspace-failed'
+export type DesktopUpdateJournalAction = 'started' | 'workspace-ready' | 'workspace-failed' | 'startup-rollback'
+  | 'host-stall-restart'
   | 'check-requested' | 'download-requested' | 'install-confirmed' | 'quit-requested'
   | 'policy-login-opened' | 'policy-login-returned' | 'policy-login-cancelled' | 'policy-login-failed'
 

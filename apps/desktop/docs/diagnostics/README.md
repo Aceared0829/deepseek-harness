@@ -13,6 +13,7 @@ This reference describes Desktop native failure recovery, diagnostic reports, re
 ## Table of Contents
 
 - [Recover from a failure](#recovery)
+- [Startup and stall supervision](#supervision)
 - [Report contents](#report-contents)
 - [Recent operation records](#operation-records)
 - [Collection and shutdown](#collection-and-shutdown)
@@ -21,11 +22,23 @@ This reference describes Desktop native failure recovery, diagnostic reports, re
 
 ## Recover from a failure
 
-Fatal main-window creation, main-document loading, preload, renderer, Web initialization, or backend failures open one native recovery dialog per application process. It shows a bounded tail of the first error, notes any truncation, and offers “Exit”, “Restart”, “Disable third-party plugins, back up profile patch, and restart”, and “Get diagnostic report” while report writing is pending or after it succeeds. Startup failures retain the Web loading page and spinner; runtime failures retain the current page. Expected shutdowns, cancelled navigation, and ordinary requests do not trigger recovery. The shared Web plugin manager reports package-operation errors; Host startup failures after plugin changes enter native recovery. There is no startup timeout heuristic. A listener failure containing `listen EADDRINUSE` replaces the diagnostics and reinstall advice with guidance to quit other running DSH instances, and offers “Exit”, “Restart”, and “Get diagnostic report” while report writing is pending or after it succeeds.
+Fatal main-window creation, main-document loading, preload, renderer, Web initialization, or backend failures open one native recovery dialog per application process. It shows a bounded tail of the first error, notes any truncation, and offers “Exit”, “Restart”, “Disable third-party plugins, back up profile patch, and restart”, and “Get diagnostic report” while report writing is pending or after it succeeds. Startup failures retain the Web loading page and spinner; runtime failures retain the current page. Expected shutdowns, cancelled navigation, and ordinary requests do not trigger recovery. The shared Web plugin manager reports package-operation errors; Host startup failures after plugin changes enter native recovery. A listener failure containing `listen EADDRINUSE` replaces the diagnostics and reinstall advice with guidance to quit other running DSH instances, and offers “Exit”, “Restart”, and “Get diagnostic report” while report writing is pending or after it succeeds.
 
 Recovery uses the last confirmed Desktop language from the local cache before Host settings are available; an absent or invalid cache falls back to system languages.
 
 Recovery waits for Host shutdown before changing plugin activation. The native recovery action calls the shared app-boot recovery function under the profile transaction lock. It disables third-party bundles and renames the profile’s `cordis.patch.yml` to `cordis.patch.yml.bak-<timestamp>` (with an ordinal on collisions) without parsing it; the next startup creates an empty patch. Installed packages and earlier backups remain. The home-level patch is unchanged. The Electron console records the backup path (or its absence) and the unchanged home-level patch. Invalid profile data, rename failures, or write failures are reported as recovery-operation errors; completed changes remain, and Desktop does not restart as though recovery succeeded. Desktop has no profile-reset action or emergency HTML document.
+
+<a id="supervision"></a>
+
+## Startup and stall supervision
+
+A Host that never reports readiness fails at `DSH_DESKTOP_HOST_READY_TIMEOUT_MS` (integer milliseconds from 1000 through 2147483647, default `120000`) instead of holding startup open for the process lifetime, which is what a plugin blocked in a synchronous loop would otherwise do. The deadline bounds silence rather than startup performance: a Host answering `ready` before it is unaffected, and the caller’s cleanup stops the child through the usual escalation. The failure is reported like any other pre-readiness failure.
+
+Desktop keeps a launch streak in `boot-failures.json` under Electron userData. Each launch that ends before readiness records the composition fingerprint (`package.json`, `cordis.yml`, and `cordis.patch.yml` by content) and a failure count; reaching readiness clears the file. When the same composition has failed `3` consecutive times, the next launch rolls the profile back before the Host starts, inside the same profile write lock a package operation takes: it renames the patch to `cordis.patch.yml.bak-<timestamp>` and restores the shipped bundle set, then reports the rollback in a native message box once the workspace opens. A listener conflict (another DSH instance) never authorizes a rollback, because no profile change can fix it, and a composition that already rolled back reports instead of rewriting itself again, so recovery cannot loop. A rollback that cannot write leaves the profile as it is and lets the launch fail with its own diagnostic.
+
+`DSH_DESKTOP_HOST_LIVENESS_INTERVAL_MS` (integer milliseconds, default `30000`) probes a ready Host, and `DSH_DESKTOP_HOST_STALL_PROBES` (integer count from 0 through 100, default `3`) replaces a Host that misses that many consecutive probes: the shell sweeps boot leases, stops the child, starts a replacement, and reloads the page, so the stalled event loop — and any work it held — is gone. With the defaults that is 90 seconds of silence, not one slow request. `DSH_DESKTOP_HOST_STALL_RECOVERIES` (integer from 1 through 10, default `1`) bounds those restarts per application process; a Host that stalls again after the budget is spent is reported in a native message box instead of restarted forever. `0` for either the interval or the threshold keeps detection without replacement, for deployments whose long tasks must never be sacrificed.
+
+Each answered inspection also carries the Host’s event-loop delay distribution (`observedMs`, `samples`, `p50Ms`, `p99Ms`, `maxMs`), measured with `monitorEventLoopDelay` for the Host’s lifetime. The first missed probe of an episode writes a host crash report that quotes the last measurement, so the report distinguishes a blocked loop (a large `max` over a small `p50`) from sustained pressure (a large `p99` across many samples). A platform that refuses a histogram costs only the measurement: the report then says none was available.
 
 <a id="report-contents"></a>
 
