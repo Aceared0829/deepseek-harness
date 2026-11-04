@@ -89,6 +89,9 @@ const CJK_CONTEXT_OVERFLOW = new RegExp(
   String.raw`(?:输入|请求|对话|上下文|提示词)`
   + String.raw`[\s\S]{0,24}?`
   + String.raw`(?:超过|超出|大于|突破)[了]?`
+  // Reject retry, count, and duration limits before the bound noun: "请求超过最大重试次数"
+  // and "对话超过最大次数限制" are rate-limit chatter, not an overflow.
+  + String.raw`(?![\s\S]{0,16}?(?:重试|次数|轮次|超时|时长|频率|速率))`
   + String.raw`[\s\S]{0,16}?`
   + String.raw`(?:上限|最大|限制|极限)`,
 )

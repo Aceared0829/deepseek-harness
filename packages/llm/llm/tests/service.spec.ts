@@ -147,6 +147,8 @@ describe('LlmRuntime', () => {
     expect(isContextWindowExceededError('该请求被上游按参数拒绝')).toBe(false)
     expect(isContextWindowExceededError('模型当前负载较高')).toBe(false)
     expect(isContextWindowExceededError('超过最大重试次数')).toBe(false)
+    expect(isContextWindowExceededError('请求超过最大重试次数')).toBe(false)
+    expect(isContextWindowExceededError('对话超过最大次数限制')).toBe(false)
     expect(isContextWindowExceededError('耗时超过限制')).toBe(false)
     expect(isContextWindowExceededError('账号额度不足')).toBe(false)
   })
