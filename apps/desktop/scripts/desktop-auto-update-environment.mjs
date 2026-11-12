@@ -33,7 +33,7 @@ const UPDATE_ENVIRONMENTS = {
   },
 }
 
-const UPDATE_TARGETS = new Set(['mac-arm64', 'mac-x64', 'win-x64'])
+const UPDATE_TARGETS = new Set(['linux-x64', 'mac-arm64', 'mac-x64', 'win-x64'])
 
 /**
  * Name the fixed installer object shared by uploading and cache refresh.
@@ -161,6 +161,8 @@ function httpsOrigin(value, name) {
  * @throws {Error} When the test deployment lacks a valid HTTPS origin or a 32-character lowercase hexadecimal release ID.
  */
 export function resolveDesktopAutoUpdateConfig(env, platform, arch) {
+  // Linux packages are built and installed locally; the release feeds stay macOS and Windows only.
+  if (platform === 'linux') return undefined
   const channel = resolveDesktopUpdateChannel(env)
   const environment = resolveDesktopAutoUpdateEnvironment(env)
   const target = resolveDesktopAutoUpdateTarget(platform, arch)

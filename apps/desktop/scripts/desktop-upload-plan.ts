@@ -18,6 +18,7 @@ import { validateDesktopBuildVersion } from './desktop-build-version.mjs'
 const APP_ROOT = resolve(import.meta.dirname, '..')
 const REPOSITORY_ROOT = resolve(APP_ROOT, '..', '..')
 const TARGETS = {
+  'linux-x64': { platform: 'linux', arch: 'x64', os: 'linux' },
   'mac-arm64': { platform: 'darwin', arch: 'arm64', os: 'mac' },
   'mac-x64': { platform: 'darwin', arch: 'x64', os: 'mac' },
   'win-x64': { platform: 'win32', arch: 'x64', os: 'win' },
@@ -189,6 +190,10 @@ export async function createDesktopUploadPlan(
   const target = TARGETS[targetName]
   if (target === undefined) {
     throw new Error(`desktop upload: unsupported target ${String(targetName)}`)
+  }
+  // Linux artifacts are local only: the release feeds and their upload destinations stay macOS and Windows.
+  if (target.platform === 'linux') {
+    throw new Error(`desktop upload: ${targetName} is a local-only artifact and has no upload destination`)
   }
   const environment = options.environment ?? process.env
   const repositoryRoot = options.repositoryRoot ?? REPOSITORY_ROOT

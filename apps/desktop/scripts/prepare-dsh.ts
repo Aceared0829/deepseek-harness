@@ -23,6 +23,8 @@ import { smokePrimaryRuntime } from './prepare-primary-runtime.ts'
 import { smokePreparedRuntime } from './smoke-prepared-runtime.ts'
 import { prepareRuntimeManifests } from './prepare-runtime-manifests.ts'
 import { prepareRuntimePatches, verifyRuntimePatches } from './prepare-runtime-patches.ts'
+import { replaceSharpWithWasm } from './linux-sharp.ts'
+import { forceWebAssemblyOffice } from './linux-office.ts'
 import { writeDesktopRuntime, writeDesktopRuntimeAsync, verifyDesktopRuntime } from '../src/runtime-tree.ts'
 import {
   resolveDesktopAppId,
@@ -44,7 +46,9 @@ const STORE_ROOT = BUILD_PATHS.pnpmStore
 const RUNTIME_ROOT = BUILD_PATHS.runtime
 const PNPM_BUILD_STATE = BUILD_PATHS.dshPnpm
 const PACKAGE_SET_ROOT = BUILD_PATHS.packageSet
-const NODE = join(BUILD_PATHS.electron, process.platform === 'win32' ? 'electron.exe' : 'Electron.app/Contents/MacOS/Electron')
+const TARGET = desktopTargetPlatform(resolveDesktopBuildTarget())
+const NODE = join(BUILD_PATHS.electron,
+  TARGET.platform === 'win32' ? 'electron.exe' : TARGET.platform === 'darwin' ? 'Electron.app/Contents/MacOS/Electron' : 'electron')
 const PNPM = join(RUNTIME_ROOT, 'primary-runtime', 'dependencies', 'pnpm', 'bin', 'pnpm.mjs')
 
 function manifestVersion(path: string, subject: string): string {
@@ -151,6 +155,21 @@ async function main(): Promise<void> {
         filter: source => desktopRuntimeFileExclusion(relative(modules, source), target, officeEngine) === undefined,
       })
     })
+    if (target.platform === 'linux') {
+      await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'runtime:linux-office', async () => {
+        forceWebAssemblyOffice(DSH_OUTPUT_ROOT)
+      })
+      await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'runtime:linux-sharp', async () => {
+        replaceSharpWithWasm(DSH_OUTPUT_ROOT, PNPM, NODE, {
+          ...process.env,
+          ...desktopNodeEnvironment(NODE, join(RUNTIME_ROOT, 'bin'), {}),
+          NPM_CONFIG_REGISTRY: resolveNpmRegistry(process.env),
+          NPM_CONFIG_STORE_DIR: STORE_ROOT,
+          PATH: `${join(RUNTIME_ROOT, 'bin')}${delimiter}${process.env.PATH ?? ''}`,
+          XDG_CACHE_HOME: join(PNPM_BUILD_STATE, 'cache'),
+        })
+      })
+    }
     writeFileSync(join(DSH_OUTPUT_ROOT, 'package.json'), `${JSON.stringify({
       name: '@deepseek-ai/dsh-desktop-runtime', private: true, version: release.version, type: 'module',
       dependencies: Object.fromEntries(packageSet.packages.map(entry => [entry.name, entry.version])),
